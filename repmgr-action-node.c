@@ -717,6 +717,7 @@ do_node_check(void)
 		exit(SUCCESS);
 	}
 
+
 	if (strlen(config_file_options.conninfo))
 		conn = establish_db_connection(config_file_options.conninfo, true);
 	else
@@ -912,7 +913,6 @@ do_node_check_replication_connection(void)
 	t_conninfo_param_list remote_conninfo = T_CONNINFO_PARAM_LIST_INITIALIZER;
 	PQExpBufferData output;
 
-
 	initPQExpBuffer(&output);
 	appendPQExpBufferStr(&output,
 						 "--connection=");
@@ -968,6 +968,43 @@ do_node_check_replication_connection(void)
 	return;
 }
 
+
+void
+do_node_check_config(char *argv0)
+{
+	static ItemList config_errors = {NULL, NULL};
+	static ItemList config_warnings = {NULL, NULL};
+	PQExpBufferData output;
+
+	get_config_file(runtime_options.config_file, true, argv0);
+	parse_config(&config_file_options, &config_errors, &config_warnings);
+
+	if (config_errors.head != NULL)
+	{
+		exit_with_config_file_errors(&config_errors, &config_warnings, false);
+	}
+
+	initPQExpBuffer(&output);
+	appendPQExpBufferStr(&output, "OK");
+
+	if (config_warnings.head != NULL)
+	{
+		log_warning(_("the configuration file could be parsed but following non-critical problems found:"));
+
+		print_item_list(&config_warnings);
+
+		appendPQExpBufferStr(&output, _(" (configuration file could be parsed with warnings)"));
+	}
+	else
+	{
+		appendPQExpBufferStr(&output, _(" (configuration file could be parsed)"));
+	}
+
+	printf("%s\n", output.data);
+	termPQExpBuffer(&output);
+
+	exit(SUCCESS);
+}
 
 
 static CheckStatus
@@ -3178,6 +3215,7 @@ do_node_help(void)
 	puts("");
 	printf(_("  Following options check an individual status:\n"));
 	printf(_("    --archive-ready         number of WAL files ready for archiving\n"));
+	printf(_("    --config                whether the configuration file can be parsed successfully\n"));
 	printf(_("    --downstream            whether all downstream nodes are connected\n"));
 	printf(_("    --replication-lag       replication lag in seconds (standbys only)\n"));
 	printf(_("    --role                  check node has expected role\n"));

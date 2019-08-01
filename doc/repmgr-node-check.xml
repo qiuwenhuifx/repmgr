@@ -42,6 +42,7 @@
             Missing replication slots: OK (node has no missing physical replication slots)</programlisting>
     </para>
   </refsect1>
+
   <refsect1>
     <title>Individual checks</title>
     <para>
@@ -109,6 +110,33 @@
   </refsect1>
 
   <refsect1>
+    <title>Configuration check</title>
+    <para>
+	  A separate check is available to verify whether the provided configuration
+	  can be parsed successfully:
+	  <programlisting>
+    $ repmgr -f /etc/repmgr.conf node check --config
+    NOTICE: using provided configuration file "/etc/repmgrconf"
+	ERROR: following errors were found in the configuration file:
+      syntax error in file "/etc/repmgr.conf" line 3, near token "="
+      syntax error in file "/etc/repmgr.conf" line 6, near token "'"
+      "conninfo": required parameter was not found
+
+
+	  </programlisting>
+
+      <itemizedlist spacing="compact" mark="bullet">
+
+		<listitem>
+		  <simpara>
+			<literal>--config</literal>: checks if the node has the expected role
+		  </simpara>
+		</listitem>
+      </itemizedlist>
+	</para>
+  </refsect1>
+
+  <refsect1>
     <title>Output format</title>
     <para>
       <itemizedlist spacing="compact" mark="bullet">
@@ -166,8 +194,6 @@
 
       </itemizedlist>
     </para>
-
-
 
     <para>
       One of the following exit codes will be emitted by <command>repmgr status check</command>

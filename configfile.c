@@ -28,8 +28,7 @@ char		config_file_path[MAXPGPATH] = "";
 static bool config_file_provided = false;
 bool		config_file_found = false;
 
-static void parse_config(t_configuration_options *options, bool terse);
-static void _parse_config(t_configuration_options *options, ItemList *error_list, ItemList *warning_list);
+static void process_config(t_configuration_options *options, bool terse);
 
 static void _parse_line(char *buf, char *name, char *value);
 static void parse_event_notifications_list(t_configuration_options *options, const char *arg);
@@ -40,7 +39,6 @@ static void parse_time_unit_parameter(const char *name, const char *value, char 
 static void tablespace_list_append(t_configuration_options *options, const char *arg);
 
 
-static void exit_with_config_file_errors(ItemList *config_errors, ItemList *config_warnings, bool terse);
 
 
 void
@@ -55,8 +53,14 @@ progname(void)
 	return _progname;
 }
 
+/*
+ * Determine the valid configuration file and place its path in
+ * the global variable "config_file_path".
+ *
+ * Exit on error.
+ */
 void
-load_config(const char *config_file, bool verbose, bool terse, t_configuration_options *options, char *argv0)
+get_config_file(const char *config_file, bool verbose, char *argv0)
 {
 	struct stat stat_config;
 
@@ -148,7 +152,7 @@ load_config(const char *config_file, bool verbose, bool terse, t_configuration_o
 	 *  - /etc/repmgr.conf
 	 *  - default sysconfdir
 	 *
-	 * here we just check for the existence of the file; parse_config() will
+	 * here we just check for the existence of the file; process_config() will
 	 * handle read errors etc.
 	 *
 	 *-----------
@@ -229,21 +233,27 @@ end_search:
 			}
 		}
 	}
+}
 
-	parse_config(options, terse);
+void
+load_config(const char *config_file, bool verbose, bool terse, t_configuration_options *options, char *argv0)
+{
+
+	get_config_file(config_file, verbose, argv0);
+	process_config(options, terse);
 
 	return;
 }
 
 
 static void
-parse_config(t_configuration_options *options, bool terse)
+process_config(t_configuration_options *options, bool terse)
 {
 	/* Collate configuration file errors here for friendlier reporting */
 	static ItemList config_errors = {NULL, NULL};
 	static ItemList config_warnings = {NULL, NULL};
 
-	_parse_config(options, &config_errors, &config_warnings);
+	parse_config(options, &config_errors, &config_warnings);
 
 	/* errors found - exit after printing details, and any warnings */
 	if (config_errors.head != NULL)
@@ -262,8 +272,8 @@ parse_config(t_configuration_options *options, bool terse)
 }
 
 
-static void
-_parse_config(t_configuration_options *options, ItemList *error_list, ItemList *warning_list)
+void
+parse_config(t_configuration_options *options, ItemList *error_list, ItemList *warning_list)
 {
 	FILE	   *fp;
 
@@ -1171,8 +1181,7 @@ reload_config(t_configuration_options *orig_options, t_server_type server_type)
 
 	log_info(_("reloading configuration file"));
 
-	_parse_config(&new_options, &config_errors, &config_warnings);
-
+	parse_config(&new_options, &config_errors, &config_warnings);
 
 	if (server_type == PRIMARY || server_type == STANDBY)
 	{
@@ -1608,7 +1617,7 @@ reload_config(t_configuration_options *orig_options, t_server_type server_type)
 }
 
 
-static void
+void
 exit_with_config_file_errors(ItemList *config_errors, ItemList *config_warnings, bool terse)
 {
 	log_error(_("following errors were found in the configuration file:"));

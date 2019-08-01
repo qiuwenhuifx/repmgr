@@ -100,6 +100,7 @@
 #define OPT_ENABLE_WAL_RECEIVER			   1045
 #define OPT_DETAIL						   1046
 #define OPT_REPMGRD_FORCE_UNPAUSE		   1047
+#define OPT_CONFIG			  			   1048
 
 /* deprecated since 3.3 */
 #define OPT_DATA_DIR						999
@@ -182,6 +183,7 @@ static struct option long_options[] =
 
 /* "node check" options */
 	{"archive-ready", no_argument, NULL, OPT_ARCHIVE_READY},
+	{"config", no_argument, NULL, OPT_CONFIG},
 	{"downstream", no_argument, NULL, OPT_DOWNSTREAM},
 	{"replication-lag", no_argument, NULL, OPT_REPLICATION_LAG},
 	{"role", no_argument, NULL, OPT_ROLE},

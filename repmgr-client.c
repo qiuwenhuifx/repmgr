@@ -531,6 +531,10 @@ main(int argc, char **argv)
 				runtime_options.data_directory_config = true;
 				break;
 
+			case OPT_CONFIG:
+				runtime_options.config = true;
+				break;
+
 				/*--------------------
 				 * "node rejoin" options
 				 *--------------------
@@ -1068,6 +1072,18 @@ main(int argc, char **argv)
 	}
 
 
+	check_cli_parameters(action);
+
+	/*
+	 * "repmgr node check --config" is a special case, as we need that to
+	 * explicitly return whether the configuration file is valid or not.
+	 */
+	if (action == NODE_CHECK && runtime_options.config == true)
+	{
+		do_node_check_config(argv[0]);
+	}
+
+
 	/*
 	 * The configuration file is not required for some actions (e.g. 'standby
 	 * clone'), however if available we'll parse it anyway for options like
@@ -1079,7 +1095,6 @@ main(int argc, char **argv)
 				&config_file_options,
 				argv[0]);
 
-	check_cli_parameters(action);
 
 	/*
 	 * Sanity checks for command line parameters completed by now; any further
