@@ -3025,7 +3025,7 @@ update_monitoring_history(void)
 
 	init_replication_info(&replication_info);
 
-	if (get_replication_info(local_conn, STANDBY, &replication_info) == false)
+	if (get_replication_info(local_conn, STANDBY, &replication_info, true) == false)
 	{
 		log_warning(_("unable to retrieve replication status information, unable to update monitoring history"));
 		return;
@@ -4046,7 +4046,7 @@ do_election(NodeInfoList *sibling_nodes, int *new_primary_id)
 	}
 
 	/* get our lsn */
-	if (get_replication_info(local_conn, STANDBY, &local_replication_info) == false)
+	if (get_replication_info(local_conn, STANDBY, &local_replication_info, true) == false)
 	{
 		log_error(_("unable to retrieve replication information for local node"));
 		return ELECTION_LOST;
@@ -4137,7 +4137,7 @@ do_election(NodeInfoList *sibling_nodes, int *new_primary_id)
 			continue;
 		}
 
-		if (get_replication_info(cell->node_info->conn, cell->node_info->type, &sibling_replication_info) == false)
+		if (get_replication_info(cell->node_info->conn, cell->node_info->type, &sibling_replication_info, true) == false)
 		{
 			log_warning(_("unable to retrieve replication information for node \"%s\" (ID: %i), skipping"),
 						cell->node_info->node_name,

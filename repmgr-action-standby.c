@@ -2098,7 +2098,7 @@ do_standby_promote(void)
 
 		init_replication_info(&replication_info);
 
-		if (get_replication_info(local_conn, STANDBY, &replication_info) == false)
+		if (get_replication_info(local_conn, STANDBY, &replication_info, true) == false)
 		{
 			log_error(_("unable to retrieve replication information from local node"));
 			PQfinish(local_conn);
@@ -3429,7 +3429,7 @@ do_standby_switchover(void)
 		ReplInfo 	replication_info;
 		init_replication_info(&replication_info);
 
-		if (get_replication_info(local_conn, STANDBY, &replication_info) == false)
+		if (get_replication_info(local_conn, STANDBY, &replication_info, false) == false)
 		{
 			log_error(_("unable to retrieve replication information from local node"));
 			PQfinish(local_conn);
@@ -4392,7 +4392,7 @@ do_standby_switchover(void)
 
 		for (i = 0; i < config_file_options.wal_receive_check_timeout; i++)
 		{
-			get_replication_info(local_conn, STANDBY, &replication_info);
+			get_replication_info(local_conn, STANDBY, &replication_info, false);
 			if (replication_info.last_wal_receive_lsn >= remote_last_checkpoint_lsn)
 				break;
 

@@ -5078,7 +5078,7 @@ init_replication_info(ReplInfo *replication_info)
 
 
 bool
-get_replication_info(PGconn *conn, t_server_type node_type, ReplInfo *replication_info)
+get_replication_info(PGconn *conn, t_server_type node_type, ReplInfo *replication_info, bool use_shared_memory_funcs)
 {
 	PQExpBufferData query;
 	PGresult   *res = NULL;
@@ -5143,25 +5143,36 @@ get_replication_info(PGconn *conn, t_server_type node_type, ReplInfo *replicatio
 							 "        END AS wal_replay_paused, ");
 	}
 
+
 	/* Add information about upstream node from shared memory */
-	if (node_type == WITNESS)
+	if (use_shared_memory_funcs == true)
 	{
-		appendPQExpBufferStr(&query,
-							 "        repmgr.get_upstream_last_seen() AS upstream_last_seen, "
-							 "        repmgr.get_upstream_node_id() AS upstream_node_id ");
+		if (node_type == WITNESS)
+		{
+			appendPQExpBufferStr(&query,
+								 "        repmgr.get_upstream_last_seen() AS upstream_last_seen, "
+								 "        repmgr.get_upstream_node_id() AS upstream_node_id ");
+		}
+		else
+		{
+			appendPQExpBufferStr(&query,
+								 "        CASE WHEN pg_catalog.pg_is_in_recovery() IS FALSE "
+								 "          THEN -1 "
+								 "          ELSE repmgr.get_upstream_last_seen() "
+								 "        END AS upstream_last_seen, ");
+			appendPQExpBufferStr(&query,
+								 "        CASE WHEN pg_catalog.pg_is_in_recovery() IS FALSE "
+								 "          THEN -1 "
+								 "          ELSE repmgr.get_upstream_node_id() "
+								 "        END AS upstream_node_id ");
+		}
 	}
 	else
 	{
-		appendPQExpBufferStr(&query,
-							 "        CASE WHEN pg_catalog.pg_is_in_recovery() IS FALSE "
-							 "          THEN -1 "
-							 "          ELSE repmgr.get_upstream_last_seen() "
-							 "        END AS upstream_last_seen, ");
-		appendPQExpBufferStr(&query,
-							 "        CASE WHEN pg_catalog.pg_is_in_recovery() IS FALSE "
-							 "          THEN -1 "
-							 "          ELSE repmgr.get_upstream_node_id() "
-							 "        END AS upstream_node_id ");
+		appendPQExpBuffer(&query,
+						  "        -1 AS upstream_last_seen, "
+						  "        %i AS upstream_node_id",
+						  UNKNOWN_NODE_ID);
 	}
 
 	appendPQExpBufferStr(&query,

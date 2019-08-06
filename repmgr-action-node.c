@@ -76,7 +76,6 @@ do_node_status(void)
 
 	ItemList	warnings = {NULL, NULL};
 	RecoveryType recovery_type = RECTYPE_UNKNOWN;
-	ReplInfo	replication_info;
 	t_recovery_conf recovery_conf = T_RECOVERY_CONF_INITIALIZER;
 
 	char		data_dir[MAXPGPATH] = "";
@@ -90,8 +89,6 @@ do_node_status(void)
 	{
 		return _do_node_status_is_shutdown_cleanly();
 	}
-
-	init_replication_info(&replication_info);
 
 
 	/* config file required, so we should have "conninfo" and "data_directory" */
@@ -407,13 +404,17 @@ do_node_status(void)
 
 	if (node_info.type == STANDBY)
 	{
+		ReplInfo	replication_info;
+
 		key_value_list_set_format(&node_status,
 								  "Upstream node",
 								  "%s (ID: %i)",
 								  node_info.upstream_node_name,
 								  node_info.upstream_node_id);
 
-		get_replication_info(conn, node_info.type, &replication_info);
+		init_replication_info(&replication_info);
+
+		get_replication_info(conn, node_info.type, &replication_info, false);
 
 		key_value_list_set_format(&node_status,
 								  "Replication lag",
