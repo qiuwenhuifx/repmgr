@@ -181,6 +181,8 @@
 
 #pg_ctl_options=''			# Options to append to "pg_ctl"
 #pg_basebackup_options=''		# Options to append to "pg_basebackup"
+                                        # (Note: when cloning from Barman, repmgr will honour any
+                                        # --waldir/--xlogdir setting present in "pg_basebackup_options"
 #rsync_options=''			# Options to append to "rsync"
 ssh_options='-q -o ConnectTimeout=10'	# Options to append to "ssh"
 
@@ -209,7 +211,9 @@ ssh_options='-q -o ConnectTimeout=10'	# Options to append to "ssh"
 					# managing WAL archives (see: https://www.pgbarman.org )
 
 #recovery_min_apply_delay=		# If provided, "recovery_min_apply_delay" will be set to
-					# this value (PostgreSQL 9.4 and later).
+					# this value (PostgreSQL 9.4 and later). Value can be
+                                        # an integer representing milliseconds, or a string
+                                        # representing a period of time (e.g. '5 min').
 
 
 #------------------------------------------------------------------------------
@@ -236,7 +240,8 @@ ssh_options='-q -o ConnectTimeout=10'	# Options to append to "ssh"
 					# for the new primary to become available
 #standby_follow_timeout=15		# The max length of time (in seconds) to wait
 					# for the standby to connect to the primary
-
+#standby_follow_restart=false		# Restart the standby instead of sending a SIGHUP
+					# (only for PostgreSQL 13 and later)
 
 #------------------------------------------------------------------------------
 # "standby switchover" settings
@@ -297,6 +302,7 @@ ssh_options='-q -o ConnectTimeout=10'	# Options to append to "ssh"
 #connection_check_type=ping		# How to check availability of the upstream node; valid options:
 					#  'ping': use PQping() to check if the node is accepting connections
 					#  'connection': execute a throwaway query on the current connection
+					#  'query': execute an SQL statement on the node via the existing connection
 #reconnect_attempts=6			# Number of attempts which will be made to reconnect to an unreachable
 					# primary (or other upstream node)
 #reconnect_interval=10			# Interval between attempts to reconnect to an unreachable
@@ -339,6 +345,7 @@ ssh_options='-q -o ConnectTimeout=10'	# Options to append to "ssh"
 					# WAL receivers
 #primary_visibility_consensus=false	# If "true", only continue with failover if no standbys have seen
 					# the primary node recently. *Must* be the same on all nodes.
+#always_promote=false			# Always promote a node, even if repmgr metadata is outdated
 #failover_validation_command=''		# Script to execute for an external mechanism to validate the failover
 					# decision made by repmgrd. One or both of the following parameter placeholders
 					# should be provided, which will be replaced by repmgrd with the appropriate

@@ -5,6 +5,8 @@
 %{
 
 #include <setjmp.h>
+#include <sys/stat.h>
+#include <dirent.h>
 
 #include "repmgr.h"
 #include "configfile.h"
@@ -38,7 +40,13 @@ static sigjmp_buf *CONF_flex_fatal_jmp;
 static char *CONF_scanstr(const char *s);
 static int	CONF_flex_fatal(const char *msg);
 
-static bool ProcessConfigFile(FILE *fp, const char *config_file, KeyValueList *contents, t_configuration_options *options, ItemList *error_list, ItemList *warning_list);
+static bool ProcessConfigFile(const char *base_dir, const char *config_file, const char *calling_file, bool strict, int depth, KeyValueList *contents, ItemList *error_list, ItemList *warning_list);
+
+static bool ProcessConfigFp(FILE *fp, const char *config_file, const char *calling_file, int depth, const char *base_dir, KeyValueList *contents, ItemList *error_list, ItemList *warning_list);
+
+static bool ProcessConfigDirectory(const char *base_dir, const char *includedir, const char *calling_file, int depth, KeyValueList *contents, ItemList *error_list, ItemList *warning_list);
+
+static char *AbsoluteConfigLocation(const char *base_dir, const char *location, const char *calling_file);
 
 %}
 
@@ -90,20 +98,93 @@ STRING			\'([^'\\\n]|\\.|\'\')*\'
 
 %%
 
-extern bool
-ProcessRepmgrConfigFile(FILE *fp, const char *config_file, t_configuration_options *options, ItemList *error_list, ItemList *warning_list)
-{
-	return ProcessConfigFile(fp, config_file, NULL, options, error_list, warning_list);
-}
 
 extern bool
-ProcessPostgresConfigFile(FILE *fp, const char *config_file, KeyValueList *contents, ItemList *error_list, ItemList *warning_list)
+ProcessRepmgrConfigFile(const char *config_file, const char *base_dir, ItemList *error_list, ItemList *warning_list)
 {
-	return ProcessConfigFile(fp, config_file, contents, NULL, error_list, warning_list);
+	return ProcessConfigFile(base_dir, config_file, NULL, true, 0, NULL, error_list, warning_list);
+}
+
+
+extern bool
+ProcessPostgresConfigFile(const char *config_file, const char *base_dir, KeyValueList *contents, ItemList *error_list, ItemList *warning_list)
+{
+	//printf("ProcessPostgresConfigFile(): base: %s file: %s\n", base_dir, config_file);
+
+	return ProcessConfigFile(base_dir, config_file, NULL, true, 0, contents, error_list, warning_list);
 }
 
 static bool
-ProcessConfigFile(FILE *fp, const char *config_file, KeyValueList *contents, t_configuration_options *options, ItemList *error_list, ItemList *warning_list)
+ProcessConfigFile(const char *base_dir, const char *config_file, const char *calling_file, bool strict, int depth, KeyValueList *contents, ItemList *error_list, ItemList *warning_list)
+{
+	char	   *abs_path;
+	bool		success = true;
+	FILE	   *fp;
+
+	/*
+	 * Reject file name that is all-blank (including empty), as that leads to
+	 * confusion --- we'd try to read the containing directory as a file.
+	 */
+	if (strspn(config_file, " \t\r\n") == strlen(config_file))
+	{
+		return false;
+	}
+
+	/*
+	 * Reject too-deep include nesting depth.  This is just a safety check to
+	 * avoid dumping core due to stack overflow if an include file loops back
+	 * to itself.  The maximum nesting depth is pretty arbitrary.
+	 */
+	if (depth > 10)
+	{
+		item_list_append_format(error_list,
+								_("could not open configuration file \"%s\": maximum nesting depth exceeded"),
+								config_file);
+		return false;
+	}
+
+	abs_path = AbsoluteConfigLocation(base_dir, config_file, calling_file);
+
+	/* Reject direct recursion */
+	if (calling_file && strcmp(abs_path, calling_file) == 0)
+	{
+		item_list_append_format(error_list,
+								_("configuration file recursion in \"%s\""),
+								calling_file);
+		pfree(abs_path);
+		return false;
+	}
+
+	fp = fopen(abs_path, "r");
+	if (!fp)
+	{
+		if (strict == false)
+		{
+			item_list_append_format(error_list,
+									"skipping configuration file \"%s\"",
+									abs_path);
+		}
+		else
+		{
+			item_list_append_format(error_list,
+									"could not open configuration file \"%s\": %s",
+									abs_path,
+									strerror(errno));
+			success = false;
+		}
+	}
+	else
+	{
+		success = ProcessConfigFp(fp, abs_path, calling_file, depth + 1, base_dir, contents, error_list, warning_list);
+	}
+
+	free(abs_path);
+
+	return success;
+}
+
+static bool
+ProcessConfigFp(FILE *fp, const char *config_file, const char *calling_file, int depth, const char *base_dir, KeyValueList *contents, ItemList *error_list, ItemList *warning_list)
 {
 	volatile bool OK = true;
 	volatile YY_BUFFER_STATE lex_buffer = NULL;
@@ -129,6 +210,7 @@ ProcessConfigFile(FILE *fp, const char *config_file, KeyValueList *contents, t_c
 		goto cleanup;
 	}
 
+	//printf("ProcessConfigFp(): base: '%s' file: '%s'; calling: '%s'\n", base_dir, config_file, calling_file);
 	/*
 	 * Parse
 	 */
@@ -179,22 +261,62 @@ ProcessConfigFile(FILE *fp, const char *config_file, KeyValueList *contents, t_c
 			ConfigFileLineno++;
 		}
 
-		/* OK, process the option name and value */
-		if (contents != NULL)
+		/* Handle include files */
+		if (base_dir != NULL && strcasecmp(opt_name, "include_dir") == 0)
 		{
-			key_value_list_replace_or_set(contents,
-										  opt_name,
-										  opt_value);
+			/*
+			 * An include_dir directive isn't a variable and should be
+			 * processed immediately.
+			 */
+			if (!ProcessConfigDirectory(base_dir, opt_value, config_file,
+										depth + 1, contents,
+									    error_list, warning_list))
+				OK = false;
+			yy_switch_to_buffer(lex_buffer);
+			pfree(opt_name);
+			pfree(opt_value);
+		}
+		else if (base_dir != NULL && strcasecmp(opt_name, "include_if_exists") == 0)
+		{
+			if (!ProcessConfigFile(base_dir, opt_value, config_file,
+								   false, depth + 1, contents,
+								   error_list, warning_list))
+				OK = false;
+
+			yy_switch_to_buffer(lex_buffer);
+			pfree(opt_name);
+			pfree(opt_value);
+		}
+		else if (base_dir != NULL && strcasecmp(opt_name, "include") == 0)
+		{
+			if (!ProcessConfigFile(base_dir, opt_value, config_file,
+								   true, depth + 1, contents,
+								   error_list, warning_list))
+				OK = false;
+
+			yy_switch_to_buffer(lex_buffer);
+			pfree(opt_name);
+			pfree(opt_value);
+		}
+		else
+		{
+			/* OK, process the option name and value */
+			if (contents != NULL)
+			{
+				key_value_list_replace_or_set(contents,
+											  opt_name,
+											  opt_value);
+			}
+			else
+			{
+				parse_configuration_item(error_list,
+										 warning_list,
+										 opt_name,
+										 opt_value);
+			}
+
 		}
 
-		if (options != NULL)
-		{
-			parse_configuration_item(options,
-									 error_list,
-									 warning_list,
-									 opt_name,
-									 opt_value);
-		}
 
 		/* break out of loop if read EOF, else loop for next line */
 		if (token == 0)
@@ -253,6 +375,132 @@ cleanup:
 	return OK;
 }
 
+/*
+ * Read and parse all config files in a subdirectory in alphabetical order
+ *
+ * includedir is the absolute or relative path to the subdirectory to scan.
+ *
+ * See ProcessConfigFp for further details.
+ */
+static bool
+ProcessConfigDirectory(const char *base_dir, const char *includedir, const char *calling_file, int depth, KeyValueList *contents, ItemList *error_list, ItemList *warning_list)
+{
+	char	   *directory;
+	DIR		   *d;
+	struct dirent *de;
+	char	  **filenames;
+	int			num_filenames;
+	int			size_filenames;
+	bool		status;
+
+	/*
+	 * Reject directory name that is all-blank (including empty), as that
+	 * leads to confusion --- we'd read the containing directory, typically
+	 * resulting in recursive inclusion of the same file(s).
+	 */
+	if (strspn(includedir, " \t\r\n") == strlen(includedir))
+	{
+		item_list_append_format(error_list,
+								_("empty configuration directory name: \"%s\""),
+								includedir);
+
+		return false;
+	}
+
+	directory = AbsoluteConfigLocation(base_dir, includedir, calling_file);
+	d = opendir(directory);
+	if (d == NULL)
+	{
+		item_list_append_format(error_list,
+								_("could not open configuration directory \"%s\": %s"),
+								directory,
+								strerror(errno));
+		status = false;
+		goto cleanup;
+	}
+
+	/*
+	 * Read the directory and put the filenames in an array, so we can sort
+	 * them prior to processing the contents.
+	 */
+	size_filenames = 32;
+	filenames = (char **) palloc(size_filenames * sizeof(char *));
+	num_filenames = 0;
+
+	while ((de = readdir(d)) != NULL)
+	{
+		struct stat st;
+		char		filename[MAXPGPATH];
+
+		/*
+		 * Only parse files with names ending in ".conf".  Explicitly reject
+		 * files starting with ".".  This excludes things like "." and "..",
+		 * as well as typical hidden files, backup files, and editor debris.
+		 */
+		if (strlen(de->d_name) < 6)
+			continue;
+		if (de->d_name[0] == '.')
+			continue;
+		if (strcmp(de->d_name + strlen(de->d_name) - 5, ".conf") != 0)
+			continue;
+
+		join_path_components(filename, directory, de->d_name);
+		canonicalize_path(filename);
+		if (stat(filename, &st) == 0)
+		{
+			if (!S_ISDIR(st.st_mode))
+			{
+				/* Add file to array, increasing its size in blocks of 32 */
+				if (num_filenames >= size_filenames)
+				{
+					size_filenames += 32;
+					filenames = (char **) repalloc(filenames,
+											size_filenames * sizeof(char *));
+				}
+				filenames[num_filenames] = pstrdup(filename);
+				num_filenames++;
+			}
+		}
+		else
+		{
+			/*
+			 * stat does not care about permissions, so the most likely reason
+			 * a file can't be accessed now is if it was removed between the
+			 * directory listing and now.
+			 */
+			item_list_append_format(error_list,
+									_("could not stat file \"%s\": %s"),
+									filename, strerror(errno));
+			status = false;
+			goto cleanup;
+		}
+	}
+
+	if (num_filenames > 0)
+	{
+		int			i;
+
+		qsort(filenames, num_filenames, sizeof(char *), pg_qsort_strcmp);
+		for (i = 0; i < num_filenames; i++)
+		{
+			if (!ProcessConfigFile(base_dir, filenames[i], calling_file,
+								   true, depth, contents,
+								   error_list, warning_list))
+			{
+				status = false;
+				goto cleanup;
+			}
+		}
+	}
+	status = true;
+
+
+cleanup:
+	if (d)
+		closedir(d);
+	pfree(directory);
+	return status;
+}
 
 /*
  *		scanstr
@@ -346,6 +594,39 @@ CONF_scanstr(const char *s)
 	newStr[--j] = '\0';
 
 	return newStr;
+}
+
+/*
+ * Given a configuration file or directory location that may be a relative
+ * path, return an absolute one.  We consider the location to be relative to
+ * the directory holding the calling file, or to DataDir if no calling file.
+ */
+static char *
+AbsoluteConfigLocation(const char *base_dir, const char *location, const char *calling_file)
+{
+	char		abs_path[MAXPGPATH];
+
+	if (is_absolute_path(location))
+		return strdup(location);
+
+    if (calling_file != NULL)
+	{
+		strlcpy(abs_path, calling_file, sizeof(abs_path));
+		get_parent_directory(abs_path);
+		join_path_components(abs_path, abs_path, location);
+		canonicalize_path(abs_path);
+	}
+	else if (base_dir != NULL)
+	{
+		join_path_components(abs_path, base_dir, location);
+		canonicalize_path(abs_path);
+	}
+	else
+	{
+		strlcpy(abs_path, location, sizeof(abs_path));
+	}
+
+	return strdup(abs_path);
 }
 
 

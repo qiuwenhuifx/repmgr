@@ -39,12 +39,8 @@ static bool daemonize = true;
 static bool show_pid_file = false;
 static bool no_pid_file = false;
 
-t_configuration_options config_file_options = T_CONFIGURATION_OPTIONS_INITIALIZER;
-
 t_node_info local_node_info = T_NODE_INFO_INITIALIZER;
 PGconn	   *local_conn = NULL;
-
-
 
 /* Collate command line errors here for friendlier reporting */
 static ItemList cli_errors = {NULL, NULL};
@@ -256,7 +252,7 @@ main(int argc, char **argv)
 	 * locations). If no conifguration file is available, or it can't be parsed
 	 * parse_config() will abort anyway, with an appropriate message.
 	 */
-	load_config(config_file, verbose, false, &config_file_options, argv[0]);
+	load_config(config_file, verbose, false, argv[0]);
 
 	/* Determine pid file location, unless --no-pid-file supplied */
 
@@ -812,42 +808,92 @@ show_help(void)
 
 
 bool
-check_upstream_connection(PGconn **conn, const char *conninfo)
+check_upstream_connection(PGconn **conn, const char *conninfo, PGconn **paired_conn)
 {
 	/* Check the connection status twice in case it changes after reset */
 	bool		twice = false;
 
-	if (config_file_options.connection_check_type == CHECK_PING)
-		return is_server_available(conninfo);
-
-	if (config_file_options.connection_check_type == CHECK_CONNECTION)
+	log_debug("connection check type is \"%s\"",
+			  print_connection_check_type(config_file_options.connection_check_type));
+	/*
+	 * For the check types which do not involve using the existing database
+	 * connection, we'll perform the actual check, then as an additional
+	 * safeguard verify that the connection is still valid (as it might have
+	 * gone away during a brief outage between checks).
+	 */
+	if (config_file_options.connection_check_type != CHECK_QUERY)
 	{
 		bool success = true;
-		PGconn *test_conn = PQconnectdb(conninfo);
 
-		log_debug("check_upstream_connection(): attempting to connect to \"%s\"", conninfo);
-
-		if (PQstatus(test_conn) != CONNECTION_OK)
+		if (config_file_options.connection_check_type == CHECK_PING)
 		{
-			log_warning(_("unable to connect to \"%s\""), conninfo);
-			log_detail("\n%s", PQerrorMessage(test_conn));
-			success = false;
+			success = is_server_available(conninfo);
 		}
-		PQfinish(test_conn);
+		else if (config_file_options.connection_check_type == CHECK_CONNECTION)
+		{
+			/*
+			 * This connection is thrown away, and we never execute a query on it.
+			 */
+			PGconn *test_conn = PQconnectdb(conninfo);
 
-		return success;
+			log_debug("check_upstream_connection(): attempting to connect to \"%s\"", conninfo);
+
+			if (PQstatus(test_conn) != CONNECTION_OK)
+			{
+				log_warning(_("unable to connect to \"%s\""), conninfo);
+				log_detail("\n%s", PQerrorMessage(test_conn));
+				success = false;
+			}
+			PQfinish(test_conn);
+		}
+
+		if (success == false)
+			return false;
+
+		if (PQstatus(*conn) == CONNECTION_OK)
+			return true;
+
+		/*
+		 * Checks have succeeded, but the open connection to the primary has gone away,
+		 * possibly due to a brief outage between monitoring intervals - attempt to
+		 * reset it.
+		 */
+		log_notice(_("upstream is available but upstream connection has gone away, resetting"));
+
+		PQfinish(*conn);
+		*conn = establish_db_connection_quiet(conninfo);
+
+		if (PQstatus(*conn) == CONNECTION_OK)
+		{
+			if (paired_conn != NULL)
+			{
+				log_debug("resetting paired connection");
+				*paired_conn = *conn;
+			}
+
+			return true;
+		}
+
+		return false;
 	}
 
 	for (;;)
 	{
 		if (PQstatus(*conn) != CONNECTION_OK)
 		{
-			log_debug("check_upstream_connection(): connection not OK");
+			log_debug("check_upstream_connection(): upstream connection has gone away, resetting");
 			if (twice)
 				return false;
+
 			/* reconnect */
 			PQfinish(*conn);
-			*conn = PQconnectdb(conninfo);
+			*conn = establish_db_connection_quiet(conninfo);
+
+			if (paired_conn != NULL)
+			{
+				log_debug("resetting paired connection");
+				*paired_conn = *conn;
+			}
 			twice = true;
 		}
 		else
@@ -859,7 +905,7 @@ check_upstream_connection(PGconn **conn, const char *conninfo)
 				goto failed;
 
 			/* execute a simple query to verify connection availability */
-			if (PQsendQuery(*conn, "SELECT 1") == 0)
+			if (PQsendQuery(*conn, config_file_options.connection_check_query) == 0)
 			{
 				log_warning(_("unable to send query to upstream"));
 				log_detail("%s", PQerrorMessage(*conn));
@@ -877,8 +923,16 @@ check_upstream_connection(PGconn **conn, const char *conninfo)
 				return false;
 
 			/* reconnect */
+			log_debug("check_upstream_connection(): upstream connection not available, resetting");
+
 			PQfinish(*conn);
-			*conn = PQconnectdb(conninfo);
+			*conn = establish_db_connection_quiet(conninfo);
+
+			if (paired_conn != NULL)
+			{
+				log_debug("resetting paired connection");
+				*paired_conn = *conn;
+			}
 			twice = true;
 		}
 	}

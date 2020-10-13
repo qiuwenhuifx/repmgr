@@ -17,12 +17,214 @@
 
 <!-- remember to update the release date in ../repmgr_version.h.in -->
 
-  <sect1 id="release-5.1">
-    <title>Release 5.1</title>
-    <para><emphasis>?? ?? ??, 2020</emphasis></para>
+  <sect1 id="release-5.2.0">
+    <title>Release 5.2.0</title>
+    <para><emphasis>??? ?? ???, 2020</emphasis></para>
 
     <para>
-      &repmgr; 5.1 is a major release.
+      &repmgr; 5.2.0 is a major release.
+    </para>
+    <para>
+      This release provides support for <ulink url="https://www.postgresql.org/docs/13/release-13.htmll">PostgreSQL 13</ulink>, released in September 2020.
+    </para>
+    <para>
+      This release removes support for PostgreSQL 9.3, which was
+      <ulink url="https://www.postgresql.org/docs/9.3/release-9-3-25.html">designated EOL in November 2018</ulink>.
+    </para>
+
+    <sect2>
+      <title>General improvements</title>
+      <para>
+        <itemizedlist>
+          <listitem>
+            <para>
+              Configuration: support <command>include</command>, <command>include_dir</command> and
+              <command>include_if_exists</command> directives (see <xref linkend="configuration-file-include-directives"/>).
+            </para>
+          </listitem>
+          <listitem>
+            <para>
+              <link linkend="repmgr-standby-switchover"><command>repmgr standby switchover</command></link>:
+              Improve sanity check failure log output from the demotion candidate.
+            </para>
+            <para>
+              If database connection configuration is not consistent across all nodes, it's
+              possible remote &repmgr; invocations (e.g. during switchover, from the promotion candidate
+              to the demotion candidate) will not be able to connect to the database. This will
+              now be explicitly reported as a database connection failure, rather than as a failure
+              of the respective sanity check.
+            </para>
+          </listitem>
+          <listitem>
+            <para>
+              <link linkend="repmgr-cluster-crosscheck">repmgr cluster crosscheck</link> /
+              <link linkend="repmgr-cluster-matrix">repmgr cluster matrix</link>:
+              improve text mode output format, in particular so that node identifiers of arbitrary length are
+              displayed correctly.
+            </para>
+          </listitem>
+
+          <listitem>
+            <para>
+              <link linkend="repmgr-primary-unregister">repmgr primary unregister</link>:
+              the <option>--force</option> can be provided to unregister an active primary node, provided
+              it has no registered standby nodes.
+            </para>
+          </listitem>
+
+          <listitem>
+            <para>
+              <link linkend="repmgr-standby-clone">repmgr standby clone</link>: new option
+              <option>--verify-backup</option> to run PostgreSQL's
+              <ulink url="https://www.postgresql.org/docs/13/app-pgverifybackup.html">pg_verifybackup</ulink>
+              utility after cloning a standby to verify the integrity of the copied data
+              (PostgreSQL 13 and later).
+            </para>
+          </listitem>
+
+          <listitem>
+            <para>
+              <link linkend="repmgr-standby-clone">repmgr standby clone</link>:
+              when cloning from Barman, setting <option>--waldir</option>
+              (PostgreSQL 9.6 and earlier: <option>--xlogdir</option>) in
+              <option>pg_basebackup_options</option> will cause &repmgr; to create
+              a WAL directory outside of the main data directory and symlink
+              it from there, in the same way as would happen when cloning
+              using <application>pg_basebackup</application>.
+            </para>
+          </listitem>
+
+          <listitem>
+            <para>
+              <link linkend="repmgr-standby-follow">repmgr standby follow</link>:
+              In PostgreSQL 13 and later, a standby no longer requires a restart to
+              follow a new upstream node.
+            </para>
+            <para>
+              The old behaviour (always restarting the standby to follow a new node)
+              can be restored by setting the configuration file parameter
+              <varname>standby_follow_restart</varname> to <literal>true</literal>.
+            </para>
+          </listitem>
+
+          <listitem>
+            <para>
+              <link linkend="repmgr-node-rejoin">repmgr node rejoin</link>:
+              enable a node to attach to a target node even the target node
+              has a lower timeline (PostgreSQL 9.6 and later).
+            </para>
+          </listitem>
+
+          <listitem>
+            <para>
+              <link linkend="repmgr-node-rejoin">repmgr node rejoin</link>:
+              in PostgreSQL 13 and later, support <application>pg_rewind</application>'s
+              ability to automatically run crash recovery on a PostgreSQL instance
+              which was not shut down cleanly.
+            </para>
+          </listitem>
+
+          <listitem>
+            <para>
+              <link linkend="repmgr-node-check">repmgr node check</link>:
+              option <option>--db-connection</option> added to check if &repmgr;
+              can connect to the database on the local node.
+            </para>
+          </listitem>
+          <listitem>
+            <para>
+              <link linkend="repmgr-node-check">repmgr node check</link>:
+              report database connection error if the <option>--optformat</option> was provided.
+            </para>
+          </listitem>
+          <listitem>
+            <para>
+              Improve handling of pg_control read errors.
+            </para>
+          </listitem>
+          <listitem>
+            <para>
+              It is now possible to dump the contents of &repmgr; metadata tables with
+              <application>pg_dump</application>.
+            </para>
+          </listitem>
+        </itemizedlist>
+      </para>
+    </sect2>
+    <sect2>
+      <title>repmgrd enhancements</title>
+      <para>
+        <itemizedlist>
+
+          <listitem>
+            <para>
+              Following additional parameters can be provided to <varname>failover_validation_command</varname>:
+              <itemizedlist spacing="compact" mark="bullet">
+                <listitem>
+                  <simpara><literal>%n</literal>: node ID</simpara>
+                </listitem>
+                <listitem>
+                  <simpara><literal>%a</literal>: node name</simpara>
+                </listitem>
+                <listitem>
+                  <simpara><literal>%v</literal>: number of visible nodes</simpara>
+                </listitem>
+                <listitem>
+                  <simpara><literal>%u</literal>: number of shared upstream nodes</simpara>
+                </listitem>
+                <listitem>
+                  <simpara><literal>%t</literal>: total number of nodes</simpara>
+                </listitem>
+              </itemizedlist>
+            </para>
+          </listitem>
+
+          <listitem>
+            <para>
+              Configuration option <varname>always_promote</varname> (default: <literal>false</literal>)
+              to control whether a node should be promoted if the &repmgr; metadata is not up-to-date
+              on that node.
+            </para>
+          </listitem>
+        </itemizedlist>
+      </para>
+    </sect2>
+
+    <sect2>
+      <title>Bug fixes</title>
+      <para>
+       <itemizedlist>
+          <listitem>
+            <para>
+              <link linkend="repmgr-standby-clone">repmgr standby clone</link>:
+              fix issue with cloning from Barman where the tablespace mapping file was
+              not flushed to disk before attempting to retrieve files from Barman. GitHub #650.
+            </para>
+          </listitem>
+          <listitem>
+            <para>
+              <link linkend="repmgr-node-rejoin">repmgr node rejoin</link>:
+              ensure that when verifying a standby node has attached to its upstream, the
+              node has started streaming before confirming the success of the rejoin operation.
+            </para>
+          </listitem>
+          <listitem>
+            <para>
+              &repmgrd;: ensure primary connection is reset if same as upstream. GitHub #633.
+            </para>
+          </listitem>
+       </itemizedlist>
+      </para>
+    </sect2>
+
+  </sect1>
+
+  <sect1 id="release-5.1.0">
+    <title id="release-current">Release 5.1.0</title>
+    <para><emphasis>Mon 13 April, 2020</emphasis></para>
+
+    <para>
+      &repmgr; 5.1.0 is a major release.
     </para>
     <para>
       For details on how to upgrade an existing &repmgr; installation, see
@@ -50,6 +252,23 @@
       <para>
         <itemizedlist>
 
+          <listitem>
+            <para>
+              The requirement that the &repmgr; user is a database superuser has been
+              removed as far as possible.
+            </para>
+            <para>
+              In theory, &repmgr; can be operated with a normal database user for managing
+              the &repmgr; database, and a separate replication user for managing replication
+              connections (and replication slots, if these are in use).
+            </para>
+            <para>
+              Some operations will still require superuser permissions, e.g. for issuing
+              a <command>CHECKPOINT</command> as par of a switchover operation; in this case
+              a valid superuser should be provided with the <option>-S</option>/<option>--superuser</option>
+              option.
+            </para>
+          </listitem>
 
           <listitem>
             <para>
@@ -73,6 +292,7 @@
               Improve logging and checking of potential failure situations.
             </para>
           </listitem>
+
           <listitem>
             <para>
               <link linkend="repmgr-standby-switchover"><command>repmgr standby switchover</command></link>:
@@ -82,12 +302,37 @@
               data directory.
             </para>
           </listitem>
+
+          <listitem>
+            <para>
+              <link linkend="repmgr-standby-switchover"><command>repmgr standby switchover</command></link>:
+              Provide additional information in <option>--dry-run mode</option> output.
+            </para>
+          </listitem>
+
+          <listitem>
+            <para>
+              <link linkend="repmgr-standby-switchover"><command>repmgr standby switchover</command></link>:
+              Checks that the demotion candidate's registered repmgr.conf file can be found, to
+              prevent confusing references to an incorrectly configured data directory. GitHub 615.
+            </para>
+          </listitem>
+
           <listitem>
             <para>
               <link linkend="repmgr-node-check"><command>repmgr node check</command></link>:
               accept option <option>-S</option>/<option>--superuser</option>. GitHub #621.
             </para>
           </listitem>
+
+          <listitem>
+            <para>
+              <link linkend="repmgr-node-check"><command>repmgr node check</command></link>:
+              add  <option>--upstream</option> option to check whether the node is attached
+              to the expected upstream node.
+            </para>
+          </listitem>
+
         </itemizedlist>
       </para>
     </sect2>
@@ -112,6 +357,15 @@
             </para>
           </listitem>
 
+
+          <listitem>
+            <para>
+              <link linkend="repmgr-standby-promote"><command>repmgr standby promote</command></link>:
+              in <option>--dry-run mode</option>, display promote command which will be executed.
+            </para>
+          </listitem>
+
+
           <listitem>
             <para>
               <link linkend="repmgr-standby-promote"><command>repmgr standby promote</command></link>
@@ -123,8 +377,17 @@
 
           <listitem>
             <para>
-              <link linkend="repmgr-standby-promote"><command>repmgr standby promote</command></link>:
-              in PostgreSQL 12 and later, use <varname>service_promote_command</varname> if set.
+              <link linkend="repmgr-standby-switchover"><command>repmgr standby switchover</command></link>:
+              check for demotion candidate reattachment as late as possible to avoid spurious failure
+              reports.
+            </para>
+          </listitem>
+
+
+          <listitem>
+            <para>
+              &repmgrd;: check for presence of <option>promote_command</option> and
+              <option>follow_command</option> on receipt of <literal>SIGHUP</literal>. GitHub 614.
             </para>
           </listitem>
 
@@ -150,7 +413,7 @@
   </sect1>
 
   <sect1 id="release-5.0">
-    <title id="release-current">Release 5.0</title>
+    <title>Release 5.0</title>
     <para><emphasis>Tue 15 October, 2019</emphasis></para>
 
     <para>

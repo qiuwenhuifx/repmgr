@@ -29,7 +29,7 @@
 #define TARGET_TIMELINE_LATEST 0
 
 /*
- * This is defined src/include/utils.h, however it's not practical
+ * This is defined in src/include/utils.h, however it's not practical
  * to include that from a frontend application.
  */
 #define PG_AUTOCONF_FILENAME "postgresql.auto.conf"
@@ -78,6 +78,55 @@ typedef struct TablespaceList
 } TablespaceList;
 
 
+typedef enum
+{
+	CONFIG_BOOL,
+	CONFIG_INT,
+	CONFIG_STRING,
+	CONFIG_FAILOVER_MODE,
+	CONFIG_CONNECTION_CHECK_TYPE,
+	CONFIG_EVENT_NOTIFICATION_LIST,
+	CONFIG_TABLESPACE_MAPPING
+} ConfigItemType;
+
+
+typedef struct ConfigFileSetting
+{
+	const char	   *name;
+	ConfigItemType  type;
+    union
+    {
+        int		   *intptr;
+        char	   *strptr;
+		bool	   *boolptr;
+		failover_mode_opt *failovermodeptr;
+		ConnectionCheckType *checktypeptr;
+		EventNotificationList *notificationlistptr;
+		TablespaceList *tablespacemappingptr;
+	} val;
+	union {
+		int			intdefault;
+		const char *strdefault;
+		bool		booldefault;
+		failover_mode_opt failovermodedefault;
+		ConnectionCheckType checktypedefault;
+	} defval;
+	union {
+		int				intminval;
+	} minval;
+	union {
+		int				strmaxlen;
+	} maxval;
+	struct {
+		void (*process_func)(const char *, const char *, char *, ItemList *errors);
+		void (*postprocess_func)(const char *, const char *, char *, ItemList *errors);
+		bool	   *providedptr;
+	} process;
+} ConfigFileSetting;
+
+/* Declare the main configfile structure for client applications */
+extern ConfigFileSetting config_file_settings[];
+
 typedef struct
 {
 	/* node information */
@@ -115,6 +164,7 @@ typedef struct
 	/* standby follow settings */
 	int			primary_follow_timeout;
 	int			standby_follow_timeout;
+	bool		standby_follow_restart;
 
 	/* standby switchover settings */
 	int			shutdown_check_timeout;
@@ -152,6 +202,7 @@ typedef struct
 	int			sibling_nodes_disconnect_timeout;
 	ConnectionCheckType connection_check_type;
 	bool		primary_visibility_consensus;
+	bool		always_promote;
 	char		failover_validation_command[MAXPGPATH];
 	int			election_rerun_interval;
 	int			child_nodes_check_interval;
@@ -187,77 +238,35 @@ typedef struct
 	char		rsync_options[MAXLEN];
 	char		ssh_options[MAXLEN];
 
-	/* undocumented test settings */
+	/*
+	 * undocumented settings
+	 *
+	 * These settings are for testing or experimential features
+	 * and may be changed without notice.
+	 */
+
+	/* experimental settings */
+	bool		reconnect_loop_sync;
+
+	/* test settings */
 	int			promote_delay;
+	int			failover_delay;
+	char		connection_check_query[MAXLEN];
 } t_configuration_options;
 
-/*
- * The following will initialize the structure with a minimal set of options;
- * actual defaults are set in parse_config() before parsing the configuration file
- */
 
-#define T_CONFIGURATION_OPTIONS_INITIALIZER { \
-		/* node information */ \
-		UNKNOWN_NODE_ID, "", "", "", "", "", "", "", REPLICATION_TYPE_PHYSICAL,	\
-		/* log settings */ \
-		"", "", "", DEFAULT_LOG_STATUS_INTERVAL, \
-		/* standby clone settings */ \
-		false, "", "", { NULL, NULL }, "", false, "", false, "", \
-		/* standby promote settings */ \
-		DEFAULT_PROMOTE_CHECK_TIMEOUT, DEFAULT_PROMOTE_CHECK_INTERVAL, \
-		/* standby follow settings */ \
-		DEFAULT_PRIMARY_FOLLOW_TIMEOUT,	\
-		DEFAULT_STANDBY_FOLLOW_TIMEOUT,	\
-		/* standby switchover settings */ \
-		DEFAULT_SHUTDOWN_CHECK_TIMEOUT, \
-		DEFAULT_STANDBY_RECONNECT_TIMEOUT, \
-		DEFAULT_WAL_RECEIVE_CHECK_TIMEOUT, \
-		/* node rejoin settings */ \
-		DEFAULT_NODE_REJOIN_TIMEOUT, \
-		/* node check settings */ \
-		DEFAULT_ARCHIVE_READY_WARNING, DEFAULT_ARCHIVE_READY_CRITICAL, \
-		DEFAULT_REPLICATION_LAG_WARNING, DEFAULT_REPLICATION_LAG_CRITICAL, \
-		/* witness settings */ \
-		DEFAULT_WITNESS_SYNC_INTERVAL, \
-		/* repmgrd settings */ \
-		FAILOVER_MANUAL, DEFAULT_LOCATION, DEFAULT_PRIORITY, "", "", \
-		DEFAULT_MONITORING_INTERVAL, \
-		DEFAULT_RECONNECTION_ATTEMPTS, \
-        DEFAULT_RECONNECTION_INTERVAL, \
-        false, -1, \
-		DEFAULT_ASYNC_QUERY_TIMEOUT, \
-		DEFAULT_PRIMARY_NOTIFICATION_TIMEOUT, \
-		-1, "", false, DEFAULT_SIBLING_NODES_DISCONNECT_TIMEOUT, \
-		CHECK_PING, true, "", DEFAULT_ELECTION_RERUN_INTERVAL, \
-		DEFAULT_CHILD_NODES_CHECK_INTERVAL, \
-		DEFAULT_CHILD_NODES_DISCONNECT_MIN_COUNT, \
-		DEFAULT_CHILD_NODES_CONNECTED_MIN_COUNT, \
-		DEFAULT_CHILD_NODES_CONNECTED_INCLUDE_WITNESS, \
-		DEFAULT_CHILD_NODES_DISCONNECT_TIMEOUT, "", \
-		/* service settings */ \
-		"", "", "", "", "", "", \
-		/* repmgrd service settings */ \
-		"", "",  \
-		/* event notification settings */ \
-		"", "", { NULL, NULL }, \
-		/* barman settings */ \
-		"", "", "",	 \
-		/* rsync/ssh settings */ \
-		 "", "", \
-		/* undocumented test settings */ \
-		0 \
- }
-
-
+/* Declare the main configfile structure for client applications */
+extern t_configuration_options config_file_options;
 
 typedef struct
 {
 	char		slot[MAXLEN];
 	char		wal_method[MAXLEN];
+	char		waldir[MAXPGPATH];
 	bool		no_slot;		/* from PostgreSQL 10 */
 } t_basebackup_options;
 
-#define T_BASEBACKUP_OPTIONS_INITIALIZER { "", "", false }
+#define T_BASEBACKUP_OPTIONS_INITIALIZER { "", "", "", false }
 
 
 typedef enum
@@ -314,10 +323,11 @@ typedef struct
 void		set_progname(const char *argv0);
 const char *progname(void);
 
-void		load_config(const char *config_file, bool verbose, bool terse, t_configuration_options *options, char *argv0);
-bool		reload_config(t_configuration_options *orig_options, t_server_type server_type);
+void		load_config(const char *config_file, bool verbose, bool terse, char *argv0);
+bool		reload_config(t_server_type server_type);
+void		dump_config(void);
 
-void		parse_configuration_item(t_configuration_options *options, ItemList *error_list, ItemList *warning_list, const char *name, const char *value);
+void		parse_configuration_item(ItemList *error_list, ItemList *warning_list, const char *name, const char *value);
 
 bool		parse_recovery_conf(const char *data_dir, t_recovery_conf *conf);
 
@@ -330,6 +340,9 @@ int repmgr_atoi(const char *s,
 			ItemList *error_list,
 			int minval);
 
+void parse_time_unit_parameter(const char *name, const char *value, char *dest, ItemList *errors);
+void repmgr_canonicalize_path(const char *name, const char *value, char *config_item, ItemList *errors);
+
 bool parse_pg_basebackup_options(const char *pg_basebackup_options,
 							t_basebackup_options *backup_options,
 							int server_version_num,
@@ -337,17 +350,20 @@ bool parse_pg_basebackup_options(const char *pg_basebackup_options,
 
 int parse_output_to_argv(const char *string, char ***argv_array);
 void free_parsed_argv(char ***argv_array);
-
+const char *format_failover_mode(failover_mode_opt failover);
 
 /* called by repmgr-client and repmgrd */
 void		exit_with_cli_errors(ItemList *error_list, const char *repmgr_command);
+
 void		print_item_list(ItemList *item_list);
 const char *print_connection_check_type(ConnectionCheckType type);
+char 	   *print_event_notification_list(EventNotificationList *list);
+char 	   *print_tablespace_mapping(TablespaceList *tablespacemappingptr);
 
 extern bool modify_auto_conf(const char *data_dir, KeyValueList *items);
 
-extern bool ProcessRepmgrConfigFile(FILE *fp, const char *config_file, t_configuration_options *options, ItemList *error_list, ItemList *warning_list);
+extern bool ProcessRepmgrConfigFile(const char *config_file, const char *base_dir, ItemList *error_list, ItemList *warning_list);
 
-extern bool ProcessPostgresConfigFile(FILE *fp, const char *config_file, KeyValueList *contents, ItemList *error_list, ItemList *warning_list);
+extern bool ProcessPostgresConfigFile(const char *config_file, const char *base_dir, KeyValueList *contents, ItemList *error_list, ItemList *warning_list);
 
 #endif							/* _REPMGR_CONFIGFILE_H_ */

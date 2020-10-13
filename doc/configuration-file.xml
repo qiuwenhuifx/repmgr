@@ -80,6 +80,51 @@ conninfo='host=node1 user=repmgr dbname=repmgr connect_timeout=2'</programlistin
       </para>
     </note>
 
+
+    <sect3 id="configuration-file-include-directives" xreflabel="configuration file include directives">
+
+      <title>Configuration file include directives</title>
+
+      <indexterm>
+        <primary>repmgr.conf</primary>
+        <secondary>include directives</secondary>
+      </indexterm>
+      <para>
+        From &repmgr; 5.2, the configuration file can contain the following include directives:
+        <itemizedlist spacing="compact" mark="bullet">
+          <listitem>
+            <simpara>
+              <option>include</option>: include the specified file,
+              either as an absolute path or path relative to the current file
+            </simpara>
+          </listitem>
+
+          <listitem>
+            <simpara>
+              <option>include_if_exists</option>: include the specified file.
+              The file is specified as an absolute path or path relative to the current file.
+              However, if it does not exist, an error will not be raised.
+            </simpara>
+          </listitem>
+
+          <listitem>
+            <simpara>
+              <option>include_dir</option>: include files in the specified directory
+              which have the <filename>.conf</filename> suffix.
+              The directory is specified either as an absolute path or path
+              relative to the current file
+            </simpara>
+          </listitem>
+
+        </itemizedlist>
+      </para>
+      <para>
+        These behave in exactly the same way as the PostgreSQL configuration file processing;
+        see the <ulink url="https://www.postgresql.org/docs/current/config-setting.html#CONFIG-INCLUDES">PostgreSQL documentation</ulink>
+        for additional details.
+      </para>
+    </sect3>
+
   </sect2>
 
 
@@ -183,6 +228,14 @@ conninfo='host=node1 user=repmgr dbname=repmgr connect_timeout=2'</programlistin
   </para>
 
   <para>
+    In examples provided in this documentation, it is assumed the configuration file is located
+    at <filename>/etc/repmgr.conf</filename>. If &repmgr; is installed from a package, the
+    configuration file will probably be located at another location specified by the packager;
+    see appendix <xref linkend="appendix-packages"/> for configuration file locations in
+    different packaging systems.
+  </para>
+
+  <para>
    Note that if a file is explicitly specified with <literal>-f/--config-file</literal>,
    an error will be raised if it is not found or not readable, and no attempt will be made to
    check default locations; this is to prevent <application>repmgr</application> unexpectedly
@@ -202,6 +255,61 @@ conninfo='host=node1 user=repmgr dbname=repmgr connect_timeout=2'</programlistin
       <filename>/path/to/repmgr.conf</filename>).
     </para>
    </note>
+  </sect2>
+
+  <sect2 id="configuration-file-postgresql-major-upgrades" xreflabel="configuration file and PostgreSQL major version upgrades">
+    <title>Configuration file and PostgreSQL major version upgrades</title>
+
+    <indexterm>
+      <primary>repmgr.conf</primary>
+      <secondary>ostgreSQL major version upgrades</secondary>
+    </indexterm>
+
+    <para>
+      When upgrading the PostgreSQL cluster to a new major version, <filename>repmgr.conf</filename>
+      will probably needed to be updated.
+    </para>
+    <para>
+      Usually <option>pg_bindir</option> and <option>data_directory</option> will need to be modified,
+      particularly if the default package locations are used, as these usually change.
+    </para>
+
+     <para>
+       It's also possible the location of <filename>repmgr.conf</filename> itself will change
+       (e.g. from <filename>/etc/repmgr/11/repmgr.conf</filename> to <filename>/etc/repmgr/12/repmgr.conf</filename>).
+       This is stored as part of the &repmgr; metadata and is used by &repmgr; to execute &repmgr; remotely
+       (e.g. during a <link linkend="performing-switchover">switchover operation</link>).
+     </para>
+     <para>
+       If the content and/or location of <filename>repmgr.conf</filename> has changed, the &repmgr; metadata
+       needs to be updated to reflect this. The &repmgr; metadata can be updated on each node with:
+       <itemizedlist spacing="compact" mark="bullet">
+         <listitem>
+           <simpara>
+             <link linkend="repmgr-primary-register">
+               <command>repmgr primary register --force -f /path/to/repmgr.conf</command>
+             </link>
+           </simpara>
+         </listitem>
+
+         <listitem>
+           <simpara>
+             <link linkend="repmgr-standby-register">
+               <command>repmgr standby register --force -f /path/to/repmgr.conf</command>
+             </link>
+           </simpara>
+         </listitem>
+
+
+         <listitem>
+           <simpara>
+             <link linkend="repmgr-witness-register">
+               <command>repmgr witness register --force -f /path/to/repmgr.conf -h primary_host</command>
+             </link>
+           </simpara>
+         </listitem>
+       </itemizedlist>
+     </para>
 
    </sect2>
  </sect1>

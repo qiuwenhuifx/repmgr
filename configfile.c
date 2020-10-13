@@ -1,5 +1,5 @@
 /*
- * config.c - parse repmgr.conf and other configuration-related functionality
+ * configfile.c - parse repmgr.conf and other configuration-related functionality
  *
  * Copyright (c) 2ndQuadrant, 2010-2020
  *
@@ -34,17 +34,19 @@ char		config_file_path[MAXPGPATH] = "";
 static bool config_file_provided = false;
 bool		config_file_found = false;
 
-static void parse_config(t_configuration_options *options, bool terse);
-static void _parse_config(t_configuration_options *options, ItemList *error_list, ItemList *warning_list);
+
+static void parse_config(bool terse);
+static void _parse_config(ItemList *error_list, ItemList *warning_list);
 
 static void _parse_line(char *buf, char *name, char *value);
-static void parse_event_notifications_list(t_configuration_options *options, const char *arg);
-static void clear_event_notification_list(t_configuration_options *options);
+static void parse_event_notifications_list(EventNotificationList *event_notifications, const char *arg);
+static void clear_event_notification_list(EventNotificationList *event_notifications);
 
-static void parse_time_unit_parameter(const char *name, const char *value, char *dest, ItemList *errors);
+static void copy_config_file_options(t_configuration_options *original, t_configuration_options *copy);
 
-static void tablespace_list_append(t_configuration_options *options, const char *arg);
-
+static void tablespace_list_append(TablespaceList *tablespace_mapping, const char *arg);
+static void tablespace_list_copy(t_configuration_options *original, t_configuration_options *copy);
+static void tablespace_list_free(t_configuration_options *options);
 
 static void exit_with_config_file_errors(ItemList *config_errors, ItemList *config_warnings, bool terse);
 
@@ -62,7 +64,7 @@ progname(void)
 }
 
 void
-load_config(const char *config_file, bool verbose, bool terse, t_configuration_options *options, char *argv0)
+load_config(const char *config_file, bool verbose, bool terse, char *argv0)
 {
 	struct stat stat_config;
 
@@ -236,20 +238,20 @@ end_search:
 		}
 	}
 
-	parse_config(options, terse);
+	parse_config(terse);
 
 	return;
 }
 
 
 static void
-parse_config(t_configuration_options *options, bool terse)
+parse_config(bool terse)
 {
 	/* Collate configuration file errors here for friendlier reporting */
 	static ItemList config_errors = {NULL, NULL};
 	static ItemList config_warnings = {NULL, NULL};
 
-	_parse_config(options, &config_errors, &config_warnings);
+	_parse_config(&config_errors, &config_warnings);
 
 	/* errors found - exit after printing details, and any warnings */
 	if (config_errors.head != NULL)
@@ -269,162 +271,60 @@ parse_config(t_configuration_options *options, bool terse)
 
 
 static void
-_parse_config(t_configuration_options *options, ItemList *error_list, ItemList *warning_list)
+_parse_config(ItemList *error_list, ItemList *warning_list)
 {
 	FILE	   *fp;
+	char		base_directory[MAXPGPATH];
+	bool		config_ok;
+	ConfigFileSetting *setting;
+	int i = 0;
 
-	/* Initialize configuration options with sensible defaults */
-
-	/*-----------------
-	 * node information
-	 *-----------------
+	/*
+	 * Clear lists pointing to allocated memory
 	 */
-	options->node_id = UNKNOWN_NODE_ID;
-	memset(options->node_name, 0, sizeof(options->node_name));
-	memset(options->conninfo, 0, sizeof(options->conninfo));
-	memset(options->data_directory, 0, sizeof(options->data_directory));
-	memset(options->config_directory, 0, sizeof(options->data_directory));
-	memset(options->pg_bindir, 0, sizeof(options->pg_bindir));
-	memset(options->repmgr_bindir, 0, sizeof(options->repmgr_bindir));
-	options->replication_type = REPLICATION_TYPE_PHYSICAL;
 
-	/*-------------
-	 * log settings
-	 *
-	 * note: the default for "log_level" is set in log.c and does not need
-	 * to be initialised here
-	 *-------------
+	clear_event_notification_list(&config_file_options.event_notifications);
+	tablespace_list_free(&config_file_options);
+
+	/*
+	 * Initialise with default values
 	 */
-	memset(options->log_facility, 0, sizeof(options->log_facility));
-	memset(options->log_file, 0, sizeof(options->log_file));
-	options->log_status_interval = DEFAULT_LOG_STATUS_INTERVAL;
+	setting = &config_file_settings[0];
 
-	/*-----------------------
-	 * standby clone settings
-	 *------------------------
-	 */
-	options->use_replication_slots = false;
-	memset(options->replication_user, 0, sizeof(options->replication_user));
-	memset(options->pg_basebackup_options, 0, sizeof(options->pg_basebackup_options));
-	memset(options->restore_command, 0, sizeof(options->restore_command));
-	options->tablespace_mapping.head = NULL;
-	options->tablespace_mapping.tail = NULL;
-	memset(options->recovery_min_apply_delay, 0, sizeof(options->recovery_min_apply_delay));
-	options->recovery_min_apply_delay_provided = false;
-	memset(options->archive_cleanup_command, 0, sizeof(options->archive_cleanup_command));
-	options->use_primary_conninfo_password = false;
-	memset(options->passfile, 0, sizeof(options->passfile));
+	do {
+		switch (setting->type)
+		{
+			case CONFIG_INT:
+				*setting->val.intptr = setting->defval.intdefault;
+				break;
+			case CONFIG_BOOL:
+				*setting->val.boolptr = setting->defval.booldefault;
+				break;
+			case CONFIG_STRING:
+			{
+				memset((char *)setting->val.strptr, 0, setting->maxval.strmaxlen);
+				if (setting->defval.strdefault != NULL)
+					strncpy((char *)setting->val.strptr, setting->defval.strdefault, setting->maxval.strmaxlen);
+				break;
+			}
+			case CONFIG_FAILOVER_MODE:
+				*setting->val.failovermodeptr = setting->defval.failovermodedefault;
+				break;
+			case CONFIG_CONNECTION_CHECK_TYPE:
+				*setting->val.checktypeptr = setting->defval.checktypedefault;
+				break;
+			case CONFIG_EVENT_NOTIFICATION_LIST:
+			case CONFIG_TABLESPACE_MAPPING:
+				/* no default for these types; lists cleared above */
+				break;
+			default:
+				/* this should never happen */
+				log_error("unhandled setting type %i", (int)setting->type);
+		}
 
-	/*-------------------------
-	 * standby promote settings
-	 *-------------------------
-	 */
-	options->promote_check_timeout = DEFAULT_PROMOTE_CHECK_TIMEOUT;
-	options->promote_check_interval = DEFAULT_PROMOTE_CHECK_INTERVAL;
-
-	/*------------------------
-	 * standby follow settings
-	 *------------------------
-	 */
-	options->primary_follow_timeout = DEFAULT_PRIMARY_FOLLOW_TIMEOUT;
-	options->standby_follow_timeout = DEFAULT_STANDBY_FOLLOW_TIMEOUT;
-
-	/*------------------------
-	 * standby switchover settings
-	 *------------------------
-	 */
-	options->shutdown_check_timeout = DEFAULT_SHUTDOWN_CHECK_TIMEOUT;
-	options->standby_reconnect_timeout = DEFAULT_STANDBY_RECONNECT_TIMEOUT;
-	options->wal_receive_check_timeout = DEFAULT_WAL_RECEIVE_CHECK_TIMEOUT;
-
-	/*-----------------
-	 * repmgrd settings
-	 *-----------------
-	 */
-	options->failover = FAILOVER_MANUAL;
-	options->priority = DEFAULT_PRIORITY;
-	memset(options->location, 0, sizeof(options->location));
-	strncpy(options->location, DEFAULT_LOCATION, sizeof(options->location));
-	memset(options->promote_command, 0, sizeof(options->promote_command));
-	memset(options->follow_command, 0, sizeof(options->follow_command));
-	options->monitor_interval_secs = DEFAULT_MONITORING_INTERVAL;
-	/* default to 6 reconnection attempts at intervals of 10 seconds */
-	options->reconnect_attempts = DEFAULT_RECONNECTION_ATTEMPTS;
-	options->reconnect_interval = DEFAULT_RECONNECTION_INTERVAL;
-	options->monitoring_history = false;	/* new in 4.0, replaces
-											 * --monitoring-history */
-	options->degraded_monitoring_timeout = -1;
-	options->async_query_timeout = DEFAULT_ASYNC_QUERY_TIMEOUT;
-	options->primary_notification_timeout = DEFAULT_PRIMARY_NOTIFICATION_TIMEOUT;
-	options->repmgrd_standby_startup_timeout = -1; /* defaults to "standby_reconnect_timeout" if not set */
-	memset(options->repmgrd_pid_file, 0, sizeof(options->repmgrd_pid_file));
-	options->standby_disconnect_on_failover = false;
-	options->sibling_nodes_disconnect_timeout = DEFAULT_SIBLING_NODES_DISCONNECT_TIMEOUT;
-	options->connection_check_type = CHECK_PING;
-	options->primary_visibility_consensus = false;
-	memset(options->failover_validation_command, 0, sizeof(options->failover_validation_command));
-	options->election_rerun_interval = DEFAULT_ELECTION_RERUN_INTERVAL;
-
-	options->child_nodes_check_interval = DEFAULT_CHILD_NODES_CHECK_INTERVAL;
-	options->child_nodes_disconnect_min_count = DEFAULT_CHILD_NODES_DISCONNECT_MIN_COUNT;
-	options->child_nodes_connected_min_count = DEFAULT_CHILD_NODES_CONNECTED_MIN_COUNT;
-	options->child_nodes_connected_include_witness = DEFAULT_CHILD_NODES_CONNECTED_INCLUDE_WITNESS;
-	options->child_nodes_disconnect_timeout = DEFAULT_CHILD_NODES_DISCONNECT_TIMEOUT;
-	memset(options->child_nodes_disconnect_command, 0, sizeof(options->child_nodes_disconnect_command));
-
-	/*-------------
-	 * witness settings
-	 *-------------
-	 */
-	options->witness_sync_interval = DEFAULT_WITNESS_SYNC_INTERVAL;
-
-	/*-------------------------
-	 * service command settings
-	 *-------------------------
-	 */
-	memset(options->pg_ctl_options, 0, sizeof(options->pg_ctl_options));
-	memset(options->service_start_command, 0, sizeof(options->service_start_command));
-	memset(options->service_stop_command, 0, sizeof(options->service_stop_command));
-	memset(options->service_restart_command, 0, sizeof(options->service_restart_command));
-	memset(options->service_reload_command, 0, sizeof(options->service_reload_command));
-	memset(options->service_promote_command, 0, sizeof(options->service_promote_command));
-
-	/*---------------------------------
-	 * repmgrd service command settings
-	 *---------------------------------
-	 */
-	memset(options->repmgrd_service_start_command, 0, sizeof(options->repmgrd_service_start_command));
-	memset(options->repmgrd_service_stop_command, 0, sizeof(options->repmgrd_service_stop_command));
-
-	/*----------------------------
-	 * event notification settings
-	 *----------------------------
-	 */
-	memset(options->event_notification_command, 0, sizeof(options->event_notification_command));
-	options->event_notifications.head = NULL;
-	options->event_notifications.tail = NULL;
-
-	/*----------------
-	 * barman settings
-	 * ---------------
-	 */
-	memset(options->barman_host, 0, sizeof(options->barman_host));
-	memset(options->barman_server, 0, sizeof(options->barman_server));
-	memset(options->barman_config, 0, sizeof(options->barman_config));
-
-	/*-------------------
-	 * rsync/ssh settings
-	 * ------------------
-	 */
-	memset(options->rsync_options, 0, sizeof(options->rsync_options));
-	memset(options->ssh_options, 0, sizeof(options->ssh_options));
-	strncpy(options->ssh_options, "-q -o ConnectTimeout=10", sizeof(options->ssh_options));
-
-	/*---------------------------
-	 * undocumented test settings
-	 *---------------------------
-	 */
-	options->promote_delay = 0;
+		i++;
+		setting = &config_file_settings[i];
+	} while (setting->name != NULL);
 
 	/*
 	 * If no configuration file available (user didn't specify and none found
@@ -438,13 +338,16 @@ _parse_config(t_configuration_options *options, ItemList *error_list, ItemList *
 		return;
 	}
 
-	fp = fopen(config_file_path, "r");
-
 	/*
 	 * A configuration file has been found, either provided by the user or
-	 * found in one of the default locations. If we can't open it, fail with
-	 * an error.
+	 * found in one of the default locations. Sanity check whether we
+	 * can open it, and fail with an error about the nature of the file
+	 * (provided or default) if not. We do this here rather than having
+	 * to teach the configuration file parser the difference.
 	 */
+
+	fp = fopen(config_file_path, "r");
+
 	if (fp == NULL)
 	{
 		if (config_file_provided)
@@ -454,373 +357,243 @@ _parse_config(t_configuration_options *options, ItemList *error_list, ItemList *
 		}
 		else
 		{
-			log_error(_("unable to open default configuration file	\"%s\"; terminating"),
+			log_error(_("unable to open default configuration file \"%s\"; terminating"),
 					  config_file_path);
 		}
 
 		exit(ERR_BAD_CONFIG);
 	}
 
-	(void) ProcessRepmgrConfigFile(fp, config_file_path, options, error_list, warning_list);
-
 	fclose(fp);
 
-	/* check required parameters */
-	if (options->node_id == UNKNOWN_NODE_ID)
-	{
-		item_list_append(error_list, _("\"node_id\": required parameter was not found"));
-	}
+	strncpy(base_directory, config_file_path, MAXPGPATH);
+	canonicalize_path(base_directory);
+	get_parent_directory(base_directory);
 
-	if (!strlen(options->node_name))
-	{
-		item_list_append(error_list, _("\"node_name\": required parameter was not found"));
-	}
-
-	if (!strlen(options->data_directory))
-	{
-		item_list_append(error_list, _("\"data_directory\": required parameter was not found"));
-	}
-
-	if (!strlen(options->conninfo))
-	{
-		item_list_append(error_list, _("\"conninfo\": required parameter was not found"));
-	}
-	else
-	{
-		/*
-		 * Sanity check the provided conninfo string
-		 *
-		 * NOTE: PQconninfoParse() verifies the string format and checks for
-		 * valid options but does not sanity check values
-		 */
-
-		PQconninfoOption *conninfo_options = NULL;
-		char	   *conninfo_errmsg = NULL;
-
-		conninfo_options = PQconninfoParse(options->conninfo, &conninfo_errmsg);
-		if (conninfo_options == NULL)
-		{
-			PQExpBufferData error_message_buf;
-			initPQExpBuffer(&error_message_buf);
-
-			appendPQExpBuffer(&error_message_buf,
-							  _("\"conninfo\": %s	(provided: \"%s\")"),
-							  conninfo_errmsg,
-							  options->conninfo);
-
-			item_list_append(error_list, error_message_buf.data);
-			termPQExpBuffer(&error_message_buf);
-		}
-
-		PQconninfoFree(conninfo_options);
-	}
-
-	/* set values for parameters which default to other parameters */
+	config_ok = ProcessRepmgrConfigFile(config_file_path, base_directory, error_list, warning_list);
 
 	/*
-	 * From 4.1, "repmgrd_standby_startup_timeout" replaces "standby_reconnect_timeout"
-	 * in repmgrd; fall back to "standby_reconnect_timeout" if no value explicitly provided
+	 * Perform some more complex checks which the file processing step can't do,
+	 * including checking for required parameters and sanity-checking parameters
+	 * with dependencies on other parameters.
 	 */
-	if (options->repmgrd_standby_startup_timeout == -1)
+	if (config_ok == true)
 	{
-		options->repmgrd_standby_startup_timeout = options->standby_reconnect_timeout;
-	}
+		/* check required parameters */
+		if (config_file_options.node_id == UNKNOWN_NODE_ID)
+		{
+			item_list_append(error_list, _("\"node_id\": required parameter was not found"));
+		}
 
-	/* add warning about changed "barman_" parameter meanings */
-	if ((options->barman_host[0] == '\0' && options->barman_server[0] != '\0') ||
-		(options->barman_host[0] != '\0' && options->barman_server[0] == '\0'))
-	{
-		item_list_append(error_list,
-						 _("use \"barman_host\" for the hostname of the Barman server"));
-		item_list_append(error_list,
-						 _("use \"barman_server\" for the name of the [server] section in the Barman configuration file"));
+		if (!strlen(config_file_options.node_name))
+		{
+			item_list_append(error_list, _("\"node_name\": required parameter was not found"));
+		}
 
-	}
+		if (!strlen(config_file_options.data_directory))
+		{
+			item_list_append(error_list, _("\"data_directory\": required parameter was not found"));
+		}
 
-	/* other sanity checks */
+		if (!strlen(config_file_options.conninfo))
+		{
+			item_list_append(error_list, _("\"conninfo\": required parameter was not found"));
+		}
+		else
+		{
+			/*
+			 * Basic sanity check of provided conninfo string; this will catch any
+			 * invalid parameters (but not values).
+			 */
+			char	   *conninfo_errmsg = NULL;
 
-	if (options->archive_ready_warning >= options->archive_ready_critical)
-	{
-		item_list_append(error_list,
-						 _("\"archive_ready_critical\" must be greater than  \"archive_ready_warning\""));
-	}
+			if (validate_conninfo_string(config_file_options.conninfo, &conninfo_errmsg) == false)
+			{
+				PQExpBufferData error_message_buf;
+				initPQExpBuffer(&error_message_buf);
 
-	if (options->replication_lag_warning >= options->replication_lag_critical)
-	{
-		item_list_append(error_list,
-						 _("\"replication_lag_critical\" must be greater than  \"replication_lag_warning\""));
-	}
+				appendPQExpBuffer(&error_message_buf,
+								  _("\"conninfo\": %s	(provided: \"%s\")"),
+								  conninfo_errmsg,
+								  config_file_options.conninfo);
 
-	if (options->standby_reconnect_timeout < options->node_rejoin_timeout)
-	{
-		item_list_append(error_list,
-						 _("\"standby_reconnect_timeout\" must be equal to or greater than \"node_rejoin_timeout\""));
+				item_list_append(error_list, error_message_buf.data);
+				termPQExpBuffer(&error_message_buf);
+			}
+		}
+
+		/* set values for parameters which default to other parameters */
+
+		/*
+		 * From 4.1, "repmgrd_standby_startup_timeout" replaces "standby_reconnect_timeout"
+		 * in repmgrd; fall back to "standby_reconnect_timeout" if no value explicitly provided
+		 */
+		if (config_file_options.repmgrd_standby_startup_timeout == -1)
+		{
+			config_file_options.repmgrd_standby_startup_timeout = config_file_options.standby_reconnect_timeout;
+		}
+
+		/* add warning about changed "barman_" parameter meanings */
+		if ((config_file_options.barman_host[0] == '\0' && config_file_options.barman_server[0] != '\0') ||
+			(config_file_options.barman_host[0] != '\0' && config_file_options.barman_server[0] == '\0'))
+		{
+			item_list_append(error_list,
+							 _("use \"barman_host\" for the hostname of the Barman server"));
+			item_list_append(error_list,
+							 _("use \"barman_server\" for the name of the [server] section in the Barman configuration file"));
+		}
+
+		/* other sanity checks */
+
+		if (config_file_options.archive_ready_warning >= config_file_options.archive_ready_critical)
+		{
+			item_list_append(error_list,
+							 _("\"archive_ready_critical\" must be greater than  \"archive_ready_warning\""));
+		}
+
+		if (config_file_options.replication_lag_warning >= config_file_options.replication_lag_critical)
+		{
+			item_list_append(error_list,
+							 _("\"replication_lag_critical\" must be greater than  \"replication_lag_warning\""));
+		}
+
+		if (config_file_options.standby_reconnect_timeout < config_file_options.node_rejoin_timeout)
+		{
+			item_list_append(error_list,
+							 _("\"standby_reconnect_timeout\" must be equal to or greater than \"node_rejoin_timeout\""));
+		}
 	}
 }
 
 
 void
-parse_configuration_item(t_configuration_options *options, ItemList *error_list, ItemList *warning_list, const char *name, const char *value)
+parse_configuration_item(ItemList *error_list, ItemList *warning_list, const char *name, const char *value)
 {
-	if (strcmp(name, "node_id") == 0)
-	{
-		options->node_id = repmgr_atoi(value, name, error_list, MIN_NODE_ID);
-	}
-	else if (strcmp(name, "node_name") == 0)
-	{
-		if (strlen(value) < sizeof(options->node_name))
-			strncpy(options->node_name, value, sizeof(options->node_name));
-		else
-			item_list_append_format(error_list,
-									_("value for \"node_name\" must contain fewer than %lu characters"),
-									sizeof(options->node_name));
-	}
-	else if (strcmp(name, "conninfo") == 0)
-	{
-		strncpy(options->conninfo, value, MAXLEN);
-	}
-	else if (strcmp(name, "data_directory") == 0)
-	{
-		strncpy(options->data_directory, value, MAXPGPATH);
-		canonicalize_path(options->data_directory);
-	}
-	else if (strcmp(name, "config_directory") == 0)
-	{
-		strncpy(options->config_directory, value, MAXPGPATH);
-		canonicalize_path(options->config_directory);
-	}
-	else if (strcmp(name, "replication_user") == 0)
-	{
-		if (strlen(value) < sizeof(options->replication_user))
-			strncpy(options->replication_user, value, sizeof(options->replication_user));
-		else
-			item_list_append_format(error_list,
-									_("value for \"replication_user\" must contain fewer than %lu characters"),
-									sizeof(options->replication_user));
-	}
-	else if (strcmp(name, "pg_bindir") == 0)
-		strncpy(options->pg_bindir, value, MAXPGPATH);
-	else if (strcmp(name, "repmgr_bindir") == 0)
-		strncpy(options->repmgr_bindir, value, MAXPGPATH);
-
-	else if (strcmp(name, "replication_type") == 0)
-	{
-		if (strcmp(value, "physical") == 0)
-			options->replication_type = REPLICATION_TYPE_PHYSICAL;
-		else
-			item_list_append(error_list, _("value for \"replication_type\" must be \"physical\""));
-	}
-
-	/* log settings */
-	else if (strcmp(name, "log_file") == 0)
-		strncpy(options->log_file, value, MAXLEN);
-	else if (strcmp(name, "log_level") == 0)
-		strncpy(options->log_level, value, MAXLEN);
-	else if (strcmp(name, "log_facility") == 0)
-		strncpy(options->log_facility, value, MAXLEN);
-	else if (strcmp(name, "log_status_interval") == 0)
-		options->log_status_interval = repmgr_atoi(value, name, error_list, 0);
-
-	/* standby clone settings */
-	else if (strcmp(name, "use_replication_slots") == 0)
-		options->use_replication_slots = parse_bool(value, name, error_list);
-	else if (strcmp(name, "pg_basebackup_options") == 0)
-		strncpy(options->pg_basebackup_options, value, MAXLEN);
-	else if (strcmp(name, "tablespace_mapping") == 0)
-		tablespace_list_append(options, value);
-	else if (strcmp(name, "restore_command") == 0)
-		strncpy(options->restore_command, value, MAXLEN);
-	else if (strcmp(name, "recovery_min_apply_delay") == 0)
-	{
-		parse_time_unit_parameter(name, value, options->recovery_min_apply_delay, error_list);
-		options->recovery_min_apply_delay_provided = true;
-	}
-	else if (strcmp(name, "archive_cleanup_command") == 0)
-		strncpy(options->archive_cleanup_command, value, MAXLEN);
-	else if (strcmp(name, "use_primary_conninfo_password") == 0)
-		options->use_primary_conninfo_password = parse_bool(value, name, error_list);
-	else if (strcmp(name, "passfile") == 0)
-		strncpy(options->passfile, value, sizeof(options->passfile));
-
-	/* standby promote settings */
-	else if (strcmp(name, "promote_check_timeout") == 0)
-		options->promote_check_timeout = repmgr_atoi(value, name, error_list, 1);
-
-	else if (strcmp(name, "promote_check_interval") == 0)
-		options->promote_check_interval = repmgr_atoi(value, name, error_list, 1);
-
-	/* standby follow settings */
-	else if (strcmp(name, "primary_follow_timeout") == 0)
-		options->primary_follow_timeout = repmgr_atoi(value, name, error_list, 0);
-	else if (strcmp(name, "standby_follow_timeout") == 0)
-		options->standby_follow_timeout = repmgr_atoi(value, name, error_list, 0);
-
-	/* standby switchover settings */
-	else if (strcmp(name, "shutdown_check_timeout") == 0)
-		options->shutdown_check_timeout = repmgr_atoi(value, name, error_list, 0);
-	else if (strcmp(name, "standby_reconnect_timeout") == 0)
-		options->standby_reconnect_timeout = repmgr_atoi(value, name, error_list, 0);
-	else if (strcmp(name, "wal_receive_check_timeout") == 0)
-		options->wal_receive_check_timeout = repmgr_atoi(value, name, error_list, 0);
-
-	/* node rejoin settings */
-	else if (strcmp(name, "node_rejoin_timeout") == 0)
-		options->node_rejoin_timeout = repmgr_atoi(value, name, error_list, 0);
-
-	/* node check settings */
-	else if (strcmp(name, "archive_ready_warning") == 0)
-		options->archive_ready_warning = repmgr_atoi(value, name, error_list, 1);
-	else if (strcmp(name, "archive_ready_critical") == 0)
-		options->archive_ready_critical = repmgr_atoi(value, name, error_list, 1);
-	else if (strcmp(name, "replication_lag_warning") == 0)
-		options->replication_lag_warning = repmgr_atoi(value, name, error_list, 1);
-	else if (strcmp(name, "replication_lag_critical") == 0)
-		options->replication_lag_critical = repmgr_atoi(value, name, error_list, 1);
-
-	/* repmgrd settings */
-	else if (strcmp(name, "failover") == 0)
-	{
-		if (strcmp(value, "manual") == 0)
+	ConfigFileSetting *setting = &config_file_settings[0];
+	int i = 0;
+	do {
+		if (strcmp(name, setting->name) == 0)
 		{
-			options->failover = FAILOVER_MANUAL;
+			switch (setting->type)
+			{
+				/* Generic types */
+				case CONFIG_BOOL:
+				{
+					*(bool *)setting->val.boolptr = parse_bool(value, name, error_list);
+					break;
+				}
+				case CONFIG_INT:
+				{
+					*(int *)setting->val.intptr = repmgr_atoi(value, name, error_list, setting->minval.intminval);
+					break;
+				}
+				case CONFIG_STRING:
+				{
+					if (strlen(value) > setting->maxval.strmaxlen)
+					{
+						item_list_append_format(error_list,
+												_("value for \"%s\" must contain fewer than %i characters (current length: %i)"),
+												name,
+												setting->maxval.strmaxlen,
+												(int)strlen(value));
+					}
+					else
+					{
+						/* custom function for processing this string value */
+						if (setting->process.process_func != NULL)
+						{
+							(*setting->process.process_func)(name, value, (char *)setting->val.strptr, error_list);
+						}
+						/* otherwise copy as-is */
+						else
+						{
+							strncpy((char *)setting->val.strptr, value, setting->maxval.strmaxlen);
+						}
+
+						/* post-processing, e.g. path canonicalisation */
+						if (setting->process.postprocess_func != NULL)
+						{
+							(*setting->process.postprocess_func)(name, value, (char *)setting->val.strptr, error_list);
+						}
+
+						if (setting->process.providedptr != NULL)
+						{
+							*(bool *)setting->process.providedptr = true;
+						}
+					}
+					break;
+				}
+
+
+				/* repmgr types */
+				case CONFIG_FAILOVER_MODE:
+				{
+					if (strcmp(value, "manual") == 0)
+					{
+						*(failover_mode_opt *)setting->val.failovermodeptr = FAILOVER_MANUAL;
+					}
+					else if (strcmp(value, "automatic") == 0)
+					{
+						*(failover_mode_opt *)setting->val.failovermodeptr = FAILOVER_AUTOMATIC;
+					}
+					else
+					{
+						item_list_append_format(error_list,
+												_("value for \"%s\" must be \"automatic\" or \"manual\"\n"),
+												name);
+					}
+					break;
+				}
+				case CONFIG_CONNECTION_CHECK_TYPE:
+				{
+					if (strcasecmp(value, "ping") == 0)
+					{
+						*(ConnectionCheckType *)setting->val.checktypeptr = CHECK_PING;
+					}
+					else if (strcasecmp(value, "connection") == 0)
+					{
+						*(ConnectionCheckType *)setting->val.checktypeptr = CHECK_CONNECTION;
+					}
+					else if (strcasecmp(value, "query") == 0)
+					{
+						*(ConnectionCheckType *)setting->val.checktypeptr = CHECK_QUERY;
+					}
+					else
+					{
+						item_list_append_format(error_list,
+												_("value for \"%s\" must be \"ping\", \"connection\" or \"query\"\n"),
+												name);
+					}
+					break;
+				}
+				case CONFIG_EVENT_NOTIFICATION_LIST:
+				{
+					parse_event_notifications_list((EventNotificationList *)setting->val.notificationlistptr,
+												   value);
+					break;
+				}
+				case CONFIG_TABLESPACE_MAPPING:
+				{
+					tablespace_list_append((TablespaceList *)setting->val.tablespacemappingptr, value);
+					break;
+				}
+				default:
+					/* this should never happen */
+					log_error("encountered unknown configuration type %i when processing \"%s\"",
+							  (int)setting->type,
+							  setting->name);
+			}
+
+			/* Configuration item found - we can stop processing here */
+			return;
 		}
-		else if (strcmp(value, "automatic") == 0)
-		{
-			options->failover = FAILOVER_AUTOMATIC;
-		}
-		else
-		{
-			item_list_append(error_list,
-							 _("value for \"failover\" must be \"automatic\" or \"manual\"\n"));
-		}
-	}
-	else if (strcmp(name, "priority") == 0)
-		options->priority = repmgr_atoi(value, name, error_list, 0);
-	else if (strcmp(name, "location") == 0)
-		strncpy(options->location, value, sizeof(options->location));
-	else if (strcmp(name, "promote_command") == 0)
-		strncpy(options->promote_command, value, sizeof(options->promote_command));
-	else if (strcmp(name, "follow_command") == 0)
-		strncpy(options->follow_command, value, sizeof(options->follow_command));
-	else if (strcmp(name, "reconnect_attempts") == 0)
-		options->reconnect_attempts = repmgr_atoi(value, name, error_list, 0);
-	else if (strcmp(name, "reconnect_interval") == 0)
-		options->reconnect_interval = repmgr_atoi(value, name, error_list, 0);
-	else if (strcmp(name, "monitor_interval_secs") == 0)
-		options->monitor_interval_secs = repmgr_atoi(value, name, error_list, 1);
-	else if (strcmp(name, "monitoring_history") == 0)
-		options->monitoring_history = parse_bool(value, name, error_list);
-	else if (strcmp(name, "degraded_monitoring_timeout") == 0)
-		options->degraded_monitoring_timeout = repmgr_atoi(value, name, error_list, -1);
-	else if (strcmp(name, "async_query_timeout") == 0)
-		options->async_query_timeout = repmgr_atoi(value, name, error_list, 0);
-	else if (strcmp(name, "primary_notification_timeout") == 0)
-		options->primary_notification_timeout = repmgr_atoi(value, name, error_list, 0);
-	else if (strcmp(name, "repmgrd_standby_startup_timeout") == 0)
-		options->repmgrd_standby_startup_timeout = repmgr_atoi(value, name, error_list, 0);
-	else if (strcmp(name, "repmgrd_pid_file") == 0)
-		strncpy(options->repmgrd_pid_file, value, MAXPGPATH);
-	else if (strcmp(name, "standby_disconnect_on_failover") == 0)
-		options->standby_disconnect_on_failover = parse_bool(value, name, error_list);
-	else if (strcmp(name, "sibling_nodes_disconnect_timeout") == 0)
-		options->sibling_nodes_disconnect_timeout = repmgr_atoi(value, name, error_list, 0);
-	else if (strcmp(name, "connection_check_type") == 0)
-	{
-		if (strcasecmp(value, "ping") == 0)
-		{
-			options->connection_check_type = CHECK_PING;
-		}
-		else if (strcasecmp(value, "connection") == 0)
-		{
-			options->connection_check_type = CHECK_CONNECTION;
-		}
-		else if (strcasecmp(value, "query") == 0)
-		{
-			options->connection_check_type = CHECK_QUERY;
-		}
-		else
-		{
-			item_list_append(error_list,
-							 _("value for \"connection_check_type\" must be \"ping\", \"connection\" or \"query\"\n"));
-		}
-	}
-	else if (strcmp(name, "primary_visibility_consensus") == 0)
-		options->primary_visibility_consensus = parse_bool(value, name, error_list);
-	else if (strcmp(name, "failover_validation_command") == 0)
-		strncpy(options->failover_validation_command, value, sizeof(options->failover_validation_command));
-	else if (strcmp(name, "election_rerun_interval") == 0)
-		options->election_rerun_interval = repmgr_atoi(value, name, error_list, 0);
-	else if (strcmp(name, "child_nodes_check_interval") == 0)
-		options->child_nodes_check_interval = repmgr_atoi(value, name, error_list, 1);
-	else if (strcmp(name, "child_nodes_disconnect_command") == 0)
-		snprintf(options->child_nodes_disconnect_command, sizeof(options->child_nodes_disconnect_command), "%s", value);
-	else if (strcmp(name, "child_nodes_disconnect_min_count") == 0)
-		options->child_nodes_disconnect_min_count = repmgr_atoi(value, name, error_list, -1);
-	else if (strcmp(name, "child_nodes_connected_min_count") == 0)
-		options->child_nodes_connected_min_count = repmgr_atoi(value, name, error_list, -1);
-	else if (strcmp(name, "child_nodes_connected_include_witness") == 0)
-		options->child_nodes_connected_include_witness = parse_bool(value, name, error_list);
-	else if (strcmp(name, "child_nodes_disconnect_timeout") == 0)
-		options->child_nodes_disconnect_timeout = repmgr_atoi(value, name, error_list, 0);
+		i++;
+		setting = &config_file_settings[i];
+	} while (setting->name);
 
-	/* witness settings */
-	else if (strcmp(name, "witness_sync_interval") == 0)
-		options->witness_sync_interval = repmgr_atoi(value, name, error_list, 1);
+	/* If we reach here, the configuration item is either deprecated or unknown */
 
-	/* service settings */
-	else if (strcmp(name, "pg_ctl_options") == 0)
-		strncpy(options->pg_ctl_options, value, sizeof(options->pg_ctl_options));
-	else if (strcmp(name, "service_start_command") == 0)
-		strncpy(options->service_start_command, value, sizeof(options->service_start_command));
-	else if (strcmp(name, "service_stop_command") == 0)
-		strncpy(options->service_stop_command, value, sizeof(options->service_stop_command));
-	else if (strcmp(name, "service_restart_command") == 0)
-		strncpy(options->service_restart_command, value, sizeof(options->service_restart_command));
-	else if (strcmp(name, "service_reload_command") == 0)
-		strncpy(options->service_reload_command, value, sizeof(options->service_reload_command));
-	else if (strcmp(name, "service_promote_command") == 0)
-		strncpy(options->service_promote_command, value, sizeof(options->service_promote_command));
-
-	/* repmgrd service settings */
-	else if (strcmp(name, "repmgrd_service_start_command") == 0)
-		strncpy(options->repmgrd_service_start_command, value, sizeof(options->repmgrd_service_start_command));
-	else if (strcmp(name, "repmgrd_service_stop_command") == 0)
-		strncpy(options->repmgrd_service_stop_command, value, sizeof(options->repmgrd_service_stop_command));
-
-
-	/* event notification settings */
-	else if (strcmp(name, "event_notification_command") == 0)
-		strncpy(options->event_notification_command, value, sizeof(options->event_notification_command));
-	else if (strcmp(name, "event_notifications") == 0)
-	{
-		/* store unparsed value for comparison when reloading config */
-		strncpy(options->event_notifications_orig, value, sizeof(options->event_notifications_orig));
-		parse_event_notifications_list(options, value);
-	}
-
-	/* barman settings */
-	else if (strcmp(name, "barman_host") == 0)
-		strncpy(options->barman_host, value, sizeof(options->barman_host));
-	else if (strcmp(name, "barman_server") == 0)
-		strncpy(options->barman_server, value, sizeof(options->barman_server));
-	else if (strcmp(name, "barman_config") == 0)
-		strncpy(options->barman_config, value, sizeof(options->barman_config));
-
-	/* rsync/ssh settings */
-	else if (strcmp(name, "rsync_options") == 0)
-		strncpy(options->rsync_options, value, sizeof(options->rsync_options));
-	else if (strcmp(name, "ssh_options") == 0)
-		strncpy(options->ssh_options, value, sizeof(options->ssh_options));
-
-	/* undocumented settings for testing */
-	else if (strcmp(name, "promote_delay") == 0)
-		options->promote_delay = repmgr_atoi(value, name, error_list, 1);
-
-	/*
-	 * Following parameters have been deprecated or renamed from 3.x -
-	 * issue a warning
-	 */
-	else if (strcmp(name, "cluster") == 0)
+	if (strcmp(name, "cluster") == 0)
 	{
 		item_list_append(warning_list,
 						 _("parameter \"cluster\" is deprecated and will be ignored"));
@@ -862,10 +635,11 @@ parse_configuration_item(t_configuration_options *options, ItemList *error_list,
 	}
 	else
 	{
-		log_warning(_("%s/%s: unknown name/value pair provided; ignoring"), name, value);
+		item_list_append_format(warning_list,
+								_("%s='%s': unknown name/value pair provided; ignoring"), name, value);
 	}
-
 }
+
 
 
 bool
@@ -1021,7 +795,7 @@ _parse_line(char *buf, char *name, char *value)
 }
 
 
-static void
+void
 parse_time_unit_parameter(const char *name, const char *value, char *dest, ItemList *errors)
 {
 	char	   *ptr = NULL;
@@ -1032,7 +806,8 @@ parse_time_unit_parameter(const char *name, const char *value, char *dest, ItemL
 		if (errors != NULL)
 		{
 			item_list_append_format(errors,
-									_("invalid value provided for \"%s\""),
+									_("invalid value \"%s\" provided for \"%s\""),
+									value,
 									name);
 		}
 		return;
@@ -1048,8 +823,9 @@ parse_time_unit_parameter(const char *name, const char *value, char *dest, ItemL
 			{
 				item_list_append_format(
 										errors,
-										_("value provided for \"%s\" must be one of ms/s/min/h/d"),
-										name);
+										_("value for \"%s\" must be one of ms/s/min/h/d (provided: \"%s\")"),
+										name,
+										value);
 				return;
 			}
 		}
@@ -1091,6 +867,7 @@ parse_time_unit_parameter(const char *name, const char *value, char *dest, ItemL
  * - monitoring_history
  * - primary_notification_timeout
  * - primary_visibility_consensus
+ * - always_promote
  * - promote_command
  * - reconnect_attempts
  * - reconnect_interval
@@ -1115,45 +892,106 @@ parse_time_unit_parameter(const char *name, const char *value, char *dest, ItemL
  *
  * extract with something like:
  *	 grep config_file_options\\. repmgrd*.c | perl -n -e '/config_file_options\.([\w_]+)/ && print qq|$1\n|;' | sort | uniq
-
+ *
+ * Returns "true" if the configuration was successfully changed, otherwise "false".
  */
 bool
-reload_config(t_configuration_options *orig_options, t_server_type server_type)
+reload_config(t_server_type server_type)
 {
-	PGconn	   *conn;
-	t_configuration_options new_options = T_CONFIGURATION_OPTIONS_INITIALIZER;
-	bool		config_changed = false;
 	bool		log_config_changed = false;
 
-	static ItemList config_errors = {NULL, NULL};
-	static ItemList config_warnings = {NULL, NULL};
+	ItemList config_errors = {NULL, NULL};
+	ItemList config_warnings = {NULL, NULL};
+	ItemList config_changes = {NULL, NULL};
 
-	PQExpBufferData errors;
+	t_configuration_options orig_config_file_options;
+
+	copy_config_file_options(&config_file_options, &orig_config_file_options);
 
 	log_info(_("reloading configuration file"));
+	log_detail(_("using file \"%s\""), config_file_path);
 
-	_parse_config(&new_options, &config_errors, &config_warnings);
+	/*
+	 * _parse_config() will sanity-check the provided values and put any
+	 * errors/warnings in the provided lists; no need to add further sanity
+	 * checks here. We do still need to check for repmgrd-specific
+	 * requirements.
+	 */
+	_parse_config(&config_errors, &config_warnings);
 
-
-	if (new_options.failover == FAILOVER_AUTOMATIC
+	if (config_file_options.failover == FAILOVER_AUTOMATIC
 		&& (server_type == PRIMARY || server_type == STANDBY))
 	{
-		if (new_options.promote_command[0] == '\0')
+		if (config_file_options.promote_command[0] == '\0')
 		{
 			item_list_append(&config_errors, _("\"promote_command\": required parameter was not found"));
 		}
 
-		if (new_options.follow_command[0] == '\0')
+		if (config_file_options.follow_command[0] == '\0')
 		{
 			item_list_append(&config_errors, _("\"follow_command\": required parameter was not found"));
 		}
 	}
 
+
+	/* The following options cannot be changed */
+
+	if (config_file_options.node_id != orig_config_file_options.node_id)
+	{
+		item_list_append_format(&config_errors,
+								_("\"node_id\" cannot be changed, retaining current configuration %i %i"),
+								config_file_options.node_id,
+								orig_config_file_options.node_id);
+	}
+
+	if (strncmp(config_file_options.node_name, orig_config_file_options.node_name, sizeof(config_file_options.node_name)) != 0)
+	{
+		item_list_append(&config_errors,
+						 _("\"node_name\" cannot be changed, keeping current configuration"));
+	}
+
+
+	/*
+	 * conninfo
+	 *
+	 * _parse_config() will already have sanity-checked the string; we do that here
+	 * again so we can avoid trying to connect with a known bad string
+	 */
+	if (strncmp(config_file_options.conninfo, orig_config_file_options.conninfo, sizeof(config_file_options.conninfo)) != 0 && validate_conninfo_string(config_file_options.conninfo, NULL))
+	{
+		PGconn	   *conn;
+
+		/* Test conninfo string works */
+		conn = establish_db_connection(config_file_options.conninfo, false);
+
+		if (!conn || (PQstatus(conn) != CONNECTION_OK))
+		{
+			item_list_append_format(&config_errors,
+									_("provided \"conninfo\" string \"%s\" is not valid"),
+									config_file_options.conninfo);
+		}
+		else
+		{
+			item_list_append_format(&config_changes,
+									_("\"conninfo\" changed from \"%s\" to \"%s\""),
+									orig_config_file_options.conninfo,
+									config_file_options.conninfo);
+		}
+
+		PQfinish(conn);
+	}
+
+
+	/*
+	 * If any issues encountered, raise an error and roll back to the original
+	 * configuration
+	 */
 	if (config_errors.head != NULL)
 	{
 		ItemListCell *cell = NULL;
+		PQExpBufferData errors;
 
-		log_warning(_("unable to parse new configuration, retaining current configuration"));
+		log_error(_("one or more errors encountered while parsing the configuration file"));
 
 		initPQExpBuffer(&errors);
 
@@ -1168,27 +1006,17 @@ reload_config(t_configuration_options *orig_options, t_server_type server_type)
 
 		log_detail("%s", errors.data);
 		termPQExpBuffer(&errors);
+
+		log_notice(_("the current configuration has been retained unchanged"));
+
+		copy_config_file_options(&orig_config_file_options, &config_file_options);
+
 		return false;
 	}
 
-
-
-	/* The following options cannot be changed */
-
-	if (new_options.node_id != orig_options->node_id)
-	{
-		log_warning(_("\"node_id\" cannot be changed, retaining current configuration"));
-		return false;
-	}
-
-	if (strncmp(new_options.node_name, orig_options->node_name, sizeof(orig_options->node_name)) != 0)
-	{
-		log_warning(_("\"node_name\" cannot be changed, keeping current configuration"));
-		return false;
-	}
 
 	/*
-	 * No configuration problems detected - copy any changed values
+	 * No configuration problems detected - log any changed values.
 	 *
 	 * NB: keep these in the same order as in configfile.h to make it easier
 	 * to manage them
@@ -1196,290 +1024,238 @@ reload_config(t_configuration_options *orig_options, t_server_type server_type)
 
 
 	/* async_query_timeout */
-	if (orig_options->async_query_timeout != new_options.async_query_timeout)
+	if (config_file_options.async_query_timeout != orig_config_file_options.async_query_timeout)
 	{
-		orig_options->async_query_timeout = new_options.async_query_timeout;
-
-		log_info(_("\"async_query_timeout\" is now \"%i\""), new_options.async_query_timeout);
-
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"async_query_timeout\" changed from \"%i\" to \"%i\""),
+								orig_config_file_options.async_query_timeout,
+								config_file_options.async_query_timeout);
 	}
 
 	/* child_nodes_check_interval */
-	if (orig_options->child_nodes_check_interval != new_options.child_nodes_check_interval)
+	if (config_file_options.child_nodes_check_interval != orig_config_file_options.child_nodes_check_interval)
 	{
-		if (new_options.child_nodes_check_interval < 0)
-		{
-			log_error(_("\"child_nodes_check_interval\" must be \"0\" or greater; provided: \"%i\""),
-					  new_options.child_nodes_check_interval);
-		}
-		else
-		{
-			orig_options->child_nodes_check_interval = new_options.child_nodes_check_interval;
-			log_info(_("\"child_nodes_check_interval\" is now \"%i\""), new_options.child_nodes_check_interval);
-
-			config_changed = true;
-		}
+		item_list_append_format(&config_changes,
+								_("\"child_nodes_check_interval\" changed from \"%i\" to \"%i\""),
+								orig_config_file_options.child_nodes_check_interval,
+								config_file_options.child_nodes_check_interval);
 	}
 
 	/* child_nodes_disconnect_command */
-	if (strncmp(orig_options->child_nodes_disconnect_command, new_options.child_nodes_disconnect_command, sizeof(orig_options->child_nodes_disconnect_command)) != 0)
+	if (strncmp(config_file_options.child_nodes_disconnect_command, orig_config_file_options.child_nodes_disconnect_command, sizeof(config_file_options.child_nodes_disconnect_command)) != 0)
 	{
-		snprintf(orig_options->child_nodes_disconnect_command, sizeof(orig_options->child_nodes_disconnect_command),
-				 "%s", new_options.child_nodes_disconnect_command);
-		log_info(_("\"child_nodes_disconnect_command\" is now \"%s\""), new_options.child_nodes_disconnect_command);
-
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"child_nodes_disconnect_command\" changed from \"%s\" to \"%s\""),
+								orig_config_file_options.child_nodes_disconnect_command,
+								config_file_options.child_nodes_disconnect_command);
 	}
 
 	/* child_nodes_disconnect_min_count */
-	if (orig_options->child_nodes_disconnect_min_count != new_options.child_nodes_disconnect_min_count)
+	if (config_file_options.child_nodes_disconnect_min_count != orig_config_file_options.child_nodes_disconnect_min_count)
 	{
-		if (new_options.child_nodes_disconnect_min_count < 0)
-		{
-			log_error(_("\"child_nodes_disconnect_min_count\" must be \"0\" or greater; provided: \"%i\""),
-					  new_options.child_nodes_disconnect_min_count);
-		}
-		else
-		{
-			orig_options->child_nodes_disconnect_min_count = new_options.child_nodes_disconnect_min_count;
-			log_info(_("\"child_nodes_disconnect_min_count\" is now \"%i\""), new_options.child_nodes_disconnect_min_count);
-
-			config_changed = true;
-		}
+		item_list_append_format(&config_changes,
+								_("\"child_nodes_disconnect_min_count\" changed from \"%i\" to \"%i\""),
+								orig_config_file_options.child_nodes_disconnect_min_count,
+								config_file_options.child_nodes_disconnect_min_count);
 	}
 
 	/* child_nodes_connected_min_count */
-	if (orig_options->child_nodes_connected_min_count != new_options.child_nodes_connected_min_count)
+	if (config_file_options.child_nodes_connected_min_count != orig_config_file_options.child_nodes_connected_min_count)
 	{
-		if (new_options.child_nodes_connected_min_count < 0)
-		{
-			log_error(_("\"child_nodes_connected_min_count\" must be \"0\" or greater; provided: \"%i\""),
-					  new_options.child_nodes_connected_min_count);
-		}
-		else
-		{
-			orig_options->child_nodes_connected_min_count = new_options.child_nodes_connected_min_count;
-			log_info(_("\"child_nodes_connected_min_count\" is now \"%i\""), new_options.child_nodes_connected_min_count);
-
-			config_changed = true;
-		}
+		item_list_append_format(&config_changes,
+								_("\"child_nodes_connected_min_count\" changed from \"%i\" to \"%i\""),
+								orig_config_file_options.child_nodes_connected_min_count,
+								config_file_options.child_nodes_connected_min_count);
 	}
 
 	/* child_nodes_connected_include_witness */
-	if (orig_options->child_nodes_connected_include_witness != new_options.child_nodes_connected_include_witness)
+	if (config_file_options.child_nodes_connected_include_witness != orig_config_file_options.child_nodes_connected_include_witness)
 	{
-		orig_options->child_nodes_connected_include_witness = new_options.child_nodes_connected_include_witness;
-		log_info(_("\"child_nodes_connected_include_witness\" is now \"%i\""), new_options.child_nodes_connected_include_witness);
-
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"child_nodes_connected_include_witness\" changed from \"%s\" to \"%s\""),
+								format_bool(orig_config_file_options.child_nodes_connected_include_witness),
+								format_bool(config_file_options.child_nodes_connected_include_witness));
 	}
 
 	/* child_nodes_disconnect_timeout */
-	if (orig_options->child_nodes_disconnect_timeout != new_options.child_nodes_disconnect_timeout)
+	if (config_file_options.child_nodes_disconnect_timeout != orig_config_file_options.child_nodes_disconnect_timeout)
 	{
-		if (new_options.child_nodes_disconnect_timeout < 0)
-		{
-			log_error(_("\"child_nodes_disconnect_timeout\" must be \"0\" or greater; provided: \"%i\""),
-					  new_options.child_nodes_disconnect_timeout);
-		}
-		else
-		{
-			orig_options->child_nodes_disconnect_timeout = new_options.child_nodes_disconnect_timeout;
-			log_info(_("\"child_nodes_disconnect_timeout\" is now \"%i\""), new_options.child_nodes_disconnect_timeout);
-
-			config_changed = true;
-		}
+		item_list_append_format(&config_changes,
+								_("\"child_nodes_disconnect_timeout\" changed from \"%i\" to \"%i\""),
+								orig_config_file_options.child_nodes_disconnect_timeout,
+								config_file_options.child_nodes_disconnect_timeout);
 	}
 
-	/* conninfo */
-	if (strncmp(orig_options->conninfo, new_options.conninfo, sizeof(orig_options->conninfo)) != 0)
-	{
-		/* Test conninfo string works */
-		conn = establish_db_connection(new_options.conninfo, false);
-		if (!conn || (PQstatus(conn) != CONNECTION_OK))
-		{
-			log_warning(_("\"conninfo\" string is not valid, retaining current configuration"));
-		}
-		else
-		{
-			snprintf(orig_options->conninfo, sizeof(orig_options->conninfo),
-					 "%s", new_options.conninfo);
-			log_info(_("\"conninfo\" is now \"%s\""), new_options.conninfo);
-		}
-
-		PQfinish(conn);
-
-		config_changed = true;
-	}
 
 	/* degraded_monitoring_timeout */
-	if (orig_options->degraded_monitoring_timeout != new_options.degraded_monitoring_timeout)
+	if (config_file_options.degraded_monitoring_timeout != orig_config_file_options.degraded_monitoring_timeout)
 	{
-		orig_options->degraded_monitoring_timeout = new_options.degraded_monitoring_timeout;
-		log_info(_("\"degraded_monitoring_timeout\" is now \"%i\""), new_options.degraded_monitoring_timeout);
-
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"degraded_monitoring_timeout\" changed from \"%i\" to \"%i\""),
+								orig_config_file_options.degraded_monitoring_timeout,
+								config_file_options.degraded_monitoring_timeout);
 	}
 
 	/* event_notification_command */
-	if (strncmp(orig_options->event_notification_command, new_options.event_notification_command, sizeof(orig_options->event_notification_command)) != 0)
+	if (strncmp(config_file_options.event_notification_command, orig_config_file_options.event_notification_command, sizeof(config_file_options.event_notification_command)) != 0)
 	{
-		snprintf(orig_options->event_notification_command, sizeof(orig_options->event_notification_command),
-				 "%s", new_options.event_notification_command);
-		log_info(_("\"event_notification_command\" is now \"%s\""), new_options.event_notification_command);
-
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"event_notification_command\" changed from \"%s\" to \"%s\""),
+								orig_config_file_options.event_notification_command,
+								config_file_options.event_notification_command);
 	}
 
 	/* event_notifications */
-	if (strncmp(orig_options->event_notifications_orig, new_options.event_notifications_orig, sizeof(orig_options->event_notifications_orig)) != 0)
+	if (strncmp(config_file_options.event_notifications_orig, orig_config_file_options.event_notifications_orig, sizeof(config_file_options.event_notifications_orig)) != 0)
 	{
-		snprintf(orig_options->event_notifications_orig, sizeof(orig_options->event_notifications_orig),
-				 "%s", new_options.event_notifications_orig);
-		log_info(_("\"event_notifications\" is now \"%s\""), new_options.event_notifications_orig);
-
-		clear_event_notification_list(orig_options);
-		orig_options->event_notifications = new_options.event_notifications;
-
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"event_notifications\" changed from \"%s\" to \"%s\""),
+								orig_config_file_options.event_notifications_orig,
+								config_file_options.event_notifications_orig);
 	}
 
 	/* failover */
-	if (orig_options->failover != new_options.failover)
+	if (config_file_options.failover != orig_config_file_options.failover)
 	{
-		orig_options->failover = new_options.failover;
-		log_info(_("\"failover\" is now \"%s\""), new_options.failover == true ? "TRUE" : "FALSE");
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"failover\" changed from \"%s\" to \"%s\""),
+								format_failover_mode(orig_config_file_options.failover),
+								format_failover_mode(config_file_options.failover));
 	}
 
 	/* follow_command */
-	if (strncmp(orig_options->follow_command, new_options.follow_command, sizeof(orig_options->follow_command)) != 0)
+	if (strncmp(config_file_options.follow_command, orig_config_file_options.follow_command, sizeof(config_file_options.follow_command)) != 0)
 	{
-		snprintf(orig_options->follow_command, sizeof(orig_options->follow_command),
-				 "%s", new_options.follow_command);
-		log_info(_("\"follow_command\" is now \"%s\""), new_options.follow_command);
-
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"follow_command\" changed from \"%s\" to \"%s\""),
+								orig_config_file_options.follow_command,
+								config_file_options.follow_command);
 	}
 
 	/* monitor_interval_secs */
-	if (orig_options->monitor_interval_secs != new_options.monitor_interval_secs)
+	if (config_file_options.monitor_interval_secs != orig_config_file_options.monitor_interval_secs)
 	{
-		orig_options->monitor_interval_secs = new_options.monitor_interval_secs;
-		log_info(_("\"monitor_interval_secs\" is now \"%i\""), new_options.monitor_interval_secs);
-
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"monitor_interval_secs\" changed from \"%i\" to \"%i\""),
+								orig_config_file_options.monitor_interval_secs,
+								config_file_options.monitor_interval_secs);
 	}
 
 	/* monitoring_history */
-	if (orig_options->monitoring_history != new_options.monitoring_history)
+	if (config_file_options.monitoring_history != orig_config_file_options.monitoring_history)
 	{
-		orig_options->monitoring_history = new_options.monitoring_history;
-		log_info(_("\"monitoring_history\" is now \"%s\""), new_options.monitoring_history == true ? "TRUE" : "FALSE");
-
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"monitoring_history\" changed from \"%s\" to \"%s\""),
+								format_bool(orig_config_file_options.monitoring_history),
+								format_bool(config_file_options.monitoring_history));
 	}
 
 	/* primary_notification_timeout */
-	if (orig_options->primary_notification_timeout != new_options.primary_notification_timeout)
+	if (config_file_options.primary_notification_timeout != orig_config_file_options.primary_notification_timeout)
 	{
-		orig_options->primary_notification_timeout = new_options.primary_notification_timeout;
-		log_info(_("\"primary_notification_timeout\" is now \"%i\""), new_options.primary_notification_timeout);
-
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"primary_notification_timeout\" changed from \"%i\" to \"%i\""),
+								orig_config_file_options.primary_notification_timeout,
+								config_file_options.primary_notification_timeout);
 	}
 
 	/* promote_command */
-	if (strncmp(orig_options->promote_command, new_options.promote_command, sizeof(orig_options->promote_command)) != 0)
+	if (strncmp(config_file_options.promote_command, orig_config_file_options.promote_command, sizeof(config_file_options.promote_command)) != 0)
 	{
-		snprintf(orig_options->promote_command, sizeof(orig_options->promote_command),
-				 "%s", new_options.promote_command);
-		log_info(_("\"promote_command\" is now \"%s\""), new_options.promote_command);
-
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"promote_command\" changed from \"%s\" to \"%s\""),
+								orig_config_file_options.promote_command,
+								config_file_options.promote_command);
 	}
 
 	/* promote_delay (for testing use only; not documented */
-	if (orig_options->promote_delay != new_options.promote_delay)
+	if (config_file_options.promote_delay != orig_config_file_options.promote_delay)
 	{
-		orig_options->promote_delay = new_options.promote_delay;
-		log_info(_("\"promote_delay\" is now \"%i\""), new_options.promote_delay);
-
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"promote_delay\" changed from \"%i\" to \"%i\""),
+								orig_config_file_options.promote_delay,
+								config_file_options.promote_delay);
 	}
 
 	/* reconnect_attempts */
-	if (orig_options->reconnect_attempts != new_options.reconnect_attempts)
+	if (config_file_options.reconnect_attempts != orig_config_file_options.reconnect_attempts)
 	{
-		orig_options->reconnect_attempts = new_options.reconnect_attempts;
-		log_info(_("\"reconnect_attempts\" is now \"%i\""), new_options.reconnect_attempts);
-
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"reconnect_attempts\" changed from \"%i\" to \"%i\""),
+								orig_config_file_options.reconnect_attempts,
+								config_file_options.reconnect_attempts);
 	}
 
 	/* reconnect_interval */
-	if (orig_options->reconnect_interval != new_options.reconnect_interval)
+	if (config_file_options.reconnect_interval != orig_config_file_options.reconnect_interval)
 	{
-		orig_options->reconnect_interval = new_options.reconnect_interval;
-		log_info(_("\"reconnect_interval\" is now \"%i\""), new_options.reconnect_interval);
-
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"reconnect_interval\" changed from \"%i\" to \"%i\""),
+								orig_config_file_options.reconnect_interval,
+								config_file_options.reconnect_interval);
 	}
 
 	/* repmgrd_standby_startup_timeout */
-	if (orig_options->repmgrd_standby_startup_timeout != new_options.repmgrd_standby_startup_timeout)
+	if (config_file_options.repmgrd_standby_startup_timeout != orig_config_file_options.repmgrd_standby_startup_timeout)
 	{
-		orig_options->repmgrd_standby_startup_timeout = new_options.repmgrd_standby_startup_timeout;
-		log_info(_("\"repmgrd_standby_startup_timeout\" is now \"%i\""), new_options.repmgrd_standby_startup_timeout);
-
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"repmgrd_standby_startup_timeout\" changed from \"%i\" to \"%i\""),
+								orig_config_file_options.repmgrd_standby_startup_timeout,
+								config_file_options.repmgrd_standby_startup_timeout);
 	}
 
 	/* standby_disconnect_on_failover */
-	if (orig_options->standby_disconnect_on_failover != new_options.standby_disconnect_on_failover)
+	if (config_file_options.standby_disconnect_on_failover != orig_config_file_options.standby_disconnect_on_failover)
 	{
-		orig_options->standby_disconnect_on_failover = new_options.standby_disconnect_on_failover;
-		log_info(_("\"standby_disconnect_on_failover\" is now \"%s\""),
-				 new_options.standby_disconnect_on_failover == true ? "TRUE" : "FALSE");
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"standby_disconnect_on_failover\" changed from \"%s\" to \"%s\""),
+								format_bool(orig_config_file_options.standby_disconnect_on_failover),
+								format_bool(config_file_options.standby_disconnect_on_failover));
 	}
 
 	/* sibling_nodes_disconnect_timeout */
-	if (orig_options->sibling_nodes_disconnect_timeout != new_options.sibling_nodes_disconnect_timeout)
+	if (config_file_options.sibling_nodes_disconnect_timeout != orig_config_file_options.sibling_nodes_disconnect_timeout)
 	{
-		orig_options->sibling_nodes_disconnect_timeout = new_options.sibling_nodes_disconnect_timeout;
-		log_info(_("\"sibling_nodes_disconnect_timeout\" is now \"%i\""),
-				 new_options.sibling_nodes_disconnect_timeout);
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"sibling_nodes_disconnect_timeout\" changed from \"%i\" to \"%i\""),
+								orig_config_file_options.sibling_nodes_disconnect_timeout,
+								config_file_options.sibling_nodes_disconnect_timeout);
 	}
 
 	/* connection_check_type */
-	if (orig_options->connection_check_type != new_options.connection_check_type)
+	if (config_file_options.connection_check_type != orig_config_file_options.connection_check_type)
 	{
-		orig_options->connection_check_type = new_options.connection_check_type;
-		log_info(_("\"connection_check_type\" is now \"%s\""),
-				 print_connection_check_type(new_options.connection_check_type));
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"connection_check_type\" changed from \"%s\" to \"%s\""),
+								print_connection_check_type(orig_config_file_options.connection_check_type),
+								print_connection_check_type(config_file_options.connection_check_type));
 	}
 
 	/* primary_visibility_consensus */
-	if (orig_options->primary_visibility_consensus != new_options.primary_visibility_consensus)
+	if (config_file_options.primary_visibility_consensus != orig_config_file_options.primary_visibility_consensus)
 	{
-		orig_options->primary_visibility_consensus = new_options.primary_visibility_consensus;
-		log_info(_("\"primary_visibility_consensus\" is now \"%s\""),
-				 new_options.primary_visibility_consensus == true ? "TRUE" : "FALSE");
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"primary_visibility_consensus\" changed from \"%s\" to \"%s\""),
+								format_bool(orig_config_file_options.primary_visibility_consensus),
+								format_bool(config_file_options.primary_visibility_consensus));
+	}
+
+	/* always_promote */
+	if (config_file_options.always_promote != orig_config_file_options.always_promote)
+	{
+		item_list_append_format(&config_changes,
+								_("\"always_promote\" changed from \"%s\" to \"%s\""),
+								format_bool(orig_config_file_options.always_promote),
+								format_bool(config_file_options.always_promote));
 	}
 
 	/* failover_validation_command */
-	if (strncmp(orig_options->failover_validation_command, new_options.failover_validation_command, sizeof(orig_options->failover_validation_command)) != 0)
+	if (strncmp(config_file_options.failover_validation_command, orig_config_file_options.failover_validation_command, sizeof(config_file_options.failover_validation_command)) != 0)
 	{
-		snprintf(orig_options->failover_validation_command, sizeof(orig_options->failover_validation_command),
-				 "%s", new_options.failover_validation_command);
-		log_info(_("\"failover_validation_command\" is now \"%s\""), new_options.failover_validation_command);
-
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"failover_validation_command\" changed from \"%s\" to \"%s\""),
+								orig_config_file_options.failover_validation_command,
+								config_file_options.failover_validation_command);
 	}
 
 	/*
@@ -1487,43 +1263,40 @@ reload_config(t_configuration_options *orig_options, t_server_type server_type)
 	 */
 
 	/* log_facility */
-	if (strncmp(orig_options->log_facility, new_options.log_facility, sizeof(orig_options->log_facility)) != 0)
+	if (strncmp(config_file_options.log_facility, orig_config_file_options.log_facility, sizeof(config_file_options.log_facility)) != 0)
 	{
-		snprintf(orig_options->log_facility, sizeof(orig_options->log_facility),
-				 "%s", new_options.log_facility);
-		log_info(_("\"log_facility\" is now \"%s\""), new_options.log_facility);
-
-		log_config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"log_facility\" changed from \"%s\" to \"%s\""),
+								orig_config_file_options.log_facility,
+								config_file_options.log_facility);
 	}
 
 	/* log_file */
-	if (strncmp(orig_options->log_file, new_options.log_file, sizeof(orig_options->log_file)) != 0)
+	if (strncmp(config_file_options.log_file, orig_config_file_options.log_file, sizeof(config_file_options.log_file)) != 0)
 	{
-		snprintf(orig_options->log_file, sizeof(orig_options->log_file),
-				 "%s", new_options.log_file);
-		log_info(_("\"log_file\" is now \"%s\""), new_options.log_file);
-
-		log_config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"log_file\" changed from \"%s\" to \"%s\""),
+								orig_config_file_options.log_file,
+								config_file_options.log_file);
 	}
 
 
 	/* log_level */
-	if (strncmp(orig_options->log_level, new_options.log_level, sizeof(orig_options->log_level)) != 0)
+	if (strncmp(config_file_options.log_level, orig_config_file_options.log_level, sizeof(config_file_options.log_level)) != 0)
 	{
-		snprintf(orig_options->log_level, sizeof(orig_options->log_level),
-				 "%s", new_options.log_level);
-		log_info(_("\"log_level\" is now \"%s\""), new_options.log_level);
-
-		log_config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"log_level\" changed from \"%s\" to \"%s\""),
+								orig_config_file_options.log_level,
+								config_file_options.log_level);
 	}
 
 	/* log_status_interval */
-	if (orig_options->log_status_interval != new_options.log_status_interval)
+	if (config_file_options.log_status_interval != orig_config_file_options.log_status_interval)
 	{
-		orig_options->log_status_interval = new_options.log_status_interval;
-		log_info(_("\"log_status_interval\" is now \"%i\""), new_options.log_status_interval);
-
-		config_changed = true;
+		item_list_append_format(&config_changes,
+								_("\"log_status_interval\" changed from \"%i\" to \"%i\""),
+								orig_config_file_options.log_status_interval,
+								config_file_options.log_status_interval);
 	}
 
 
@@ -1531,26 +1304,120 @@ reload_config(t_configuration_options *orig_options, t_server_type server_type)
 	{
 		log_notice(_("restarting logging with changed parameters"));
 		logger_shutdown();
-		logger_init(orig_options, progname());
+		logger_init(&config_file_options, progname());
 		log_notice(_("configuration file reloaded with changed parameters"));
 	}
 
-	if (config_changed == true)
+	if (config_changes.head != NULL)
 	{
-		log_info(_("configuration has changed"));
-	}
+		ItemListCell *cell = NULL;
+		PQExpBufferData detail;
 
-	/*
-	 * neither logging nor other configuration has changed
-	 */
-	if (log_config_changed == false && config_changed == false)
+		log_notice(_("configuration was successfully changed"));
+
+		initPQExpBuffer(&detail);
+
+		appendPQExpBufferStr(&detail,
+							 _("following configuration items were changed:\n"));
+		for (cell = config_changes.head; cell; cell = cell->next)
+		{
+			appendPQExpBuffer(&detail,
+							  "  %s\n", cell->string);
+		}
+
+		log_detail("%s", detail.data);
+
+		termPQExpBuffer(&detail);
+	}
+	else
 	{
 		log_info(_("configuration has not changed"));
 	}
 
-	return config_changed;
+	/*
+	 * parse_configuration_item() (called from _parse_config()) will add warnings
+	 * about any deprecated configuration parameters; we'll dump these here as a reminder.
+	 */
+	if (config_warnings.head != NULL)
+	{
+		ItemListCell *cell = NULL;
+		PQExpBufferData detail;
+
+		log_warning(_("configuration file contains deprecated parameters"));
+
+		initPQExpBuffer(&detail);
+
+		appendPQExpBufferStr(&detail,
+							 _("following parameters are deprecated:\n"));
+		for (cell = config_warnings.head; cell; cell = cell->next)
+		{
+			appendPQExpBuffer(&detail,
+							  "  %s\n", cell->string);
+		}
+
+		log_detail("%s", detail.data);
+
+		termPQExpBuffer(&detail);
+	}
+
+	return config_changes.head == NULL ? false : true;
 }
 
+
+/*
+ * Dump the parsed configuration
+ */
+void
+dump_config(void)
+{
+	ConfigFileSetting *setting;
+	int i = 0;
+
+	setting = &config_file_settings[0];
+
+	do {
+		printf("%s|", setting->name);
+		switch (setting->type)
+		{
+			case CONFIG_INT:
+				printf("%i", *setting->val.intptr);
+				break;
+			case CONFIG_BOOL:
+				printf("%s", format_bool(*setting->val.boolptr));
+				break;
+			case CONFIG_STRING:
+				printf("%s", setting->val.strptr);
+				break;
+			case CONFIG_FAILOVER_MODE:
+				printf("%s", format_failover_mode(*setting->val.failovermodeptr));
+				break;
+			case CONFIG_CONNECTION_CHECK_TYPE:
+				printf("%s", print_connection_check_type(*setting->val.checktypeptr));
+				break;
+			case CONFIG_EVENT_NOTIFICATION_LIST:
+			{
+				char *list = print_event_notification_list(setting->val.notificationlistptr);
+				printf("%s", list);
+				pfree(list);
+			}
+				break;
+			case CONFIG_TABLESPACE_MAPPING:
+			{
+				char *list = print_tablespace_mapping(setting->val.tablespacemappingptr);
+				printf("%s", list);
+				pfree(list);
+			}
+				break;
+			default:
+				/* this should never happen */
+				log_error("unhandled setting type %i", (int)setting->type);
+		}
+		puts("");
+		i++;
+		setting = &config_file_settings[i];
+	} while (setting->name != NULL);
+
+}
 
 static void
 exit_with_config_file_errors(ItemList *config_errors, ItemList *config_warnings, bool terse)
@@ -1681,6 +1548,13 @@ repmgr_atoi(const char *value, const char *config_item, ItemList *error_list, in
 	return (int32) longval;
 }
 
+void
+repmgr_canonicalize_path(const char *name, const char *value, char *config_item, ItemList *errors)
+{
+	/* NOTE: canonicalize_path does not produce any errors */
+	canonicalize_path(config_item);
+}
+
 
 /*
  * Interpret a parameter value as a boolean. Currently accepts:
@@ -1746,13 +1620,41 @@ parse_bool(const char *s, const char *config_item, ItemList *error_list)
 
 
 /*
+ * Copy a configuration file struct
+ */
+
+void
+copy_config_file_options(t_configuration_options *original, t_configuration_options *copy)
+{
+	memcpy(copy, original, (int)sizeof(t_configuration_options));
+
+	/* Copy structures which point to allocated memory */
+
+	if (original->event_notifications.head != NULL)
+	{
+		/* For the event notifications, we can just reparse the string */
+		parse_event_notifications_list(&copy->event_notifications, original->event_notifications_orig);
+	}
+
+	if (original->tablespace_mapping.head != NULL)
+	{
+		/*
+		 * We allow multiple instances of "tablespace_mapping" in the configuration file
+		 * which are appended to the list as they're encountered.
+		 */
+		tablespace_list_copy(original, copy);
+	}
+}
+
+
+/*
  * Split argument into old_dir and new_dir and append to tablespace mapping
  * list.
  *
  * Adapted from pg_basebackup.c
  */
 static void
-tablespace_list_append(t_configuration_options *options, const char *arg)
+tablespace_list_append(TablespaceList *tablespace_mapping, const char *arg)
 {
 	TablespaceListCell *cell = NULL;
 	char	   *dst = NULL;
@@ -1803,12 +1705,54 @@ tablespace_list_append(t_configuration_options *options, const char *arg)
 	canonicalize_path(cell->old_dir);
 	canonicalize_path(cell->new_dir);
 
-	if (options->tablespace_mapping.tail)
-		options->tablespace_mapping.tail->next = cell;
+	if (tablespace_mapping->tail)
+		tablespace_mapping->tail->next = cell;
 	else
-		options->tablespace_mapping.head = cell;
+		tablespace_mapping->head = cell;
 
-	options->tablespace_mapping.tail = cell;
+	tablespace_mapping->tail = cell;
+}
+
+
+static void
+tablespace_list_copy(t_configuration_options *original, t_configuration_options *copy)
+{
+	TablespaceListCell *orig_cell = original->tablespace_mapping.head;
+
+	for (orig_cell = config_file_options.tablespace_mapping.head; orig_cell; orig_cell = orig_cell->next)
+	{
+		TablespaceListCell *copy_cell = (TablespaceListCell *) pg_malloc0(sizeof(TablespaceListCell));
+
+		strncpy(copy_cell->old_dir, orig_cell->old_dir, sizeof(copy_cell->old_dir));
+		strncpy(copy_cell->new_dir, orig_cell->new_dir, sizeof(copy_cell->new_dir));
+
+		if (copy->tablespace_mapping.tail)
+			copy->tablespace_mapping.tail->next = copy_cell;
+		else
+			copy->tablespace_mapping.head = copy_cell;
+
+		copy->tablespace_mapping.tail = copy_cell;
+	}
+}
+
+
+static void
+tablespace_list_free(t_configuration_options *options)
+{
+	TablespaceListCell *cell = NULL;
+	TablespaceListCell *next_cell = NULL;
+
+	cell = options->tablespace_mapping.head;
+
+	while (cell != NULL)
+	{
+		next_cell = cell->next;
+		pfree(cell);
+		cell = next_cell;
+	}
+
+	options->tablespace_mapping.head = NULL;
+	options->tablespace_mapping.tail = NULL;
 }
 
 
@@ -1832,20 +1776,15 @@ modify_auto_conf(const char *data_dir, KeyValueList *items)
 	appendPQExpBuffer(&auto_conf, "%s/%s",
 					  data_dir, PG_AUTOCONF_FILENAME);
 
-	fp = fopen(auto_conf.data, "r");
+	success = ProcessPostgresConfigFile(auto_conf.data, NULL, &config, NULL, NULL);
 
-	if (fp == NULL)
+	if (success == false)
 	{
-		fprintf(stderr, "unable to open \"%s\": %s\n",
-				auto_conf.data,
-				strerror(errno));
+		fprintf(stderr, "unable to process \"%s\"\n",
+				auto_conf.data);
 		termPQExpBuffer(&auto_conf);
 		return false;
 	}
-
-	// XXX check return value
-	(void) ProcessPostgresConfigFile(fp, auto_conf.data, &config, NULL, NULL);
-	fclose(fp);
 
 	/*
 	 * Append requested items to items extracted from the existing file.
@@ -1855,7 +1794,6 @@ modify_auto_conf(const char *data_dir, KeyValueList *items)
 		key_value_list_replace_or_set(&config,
 									  cell->key,
 									  cell->value);
-
 	}
 
 	initPQExpBuffer(&auto_conf_tmp);
@@ -1911,9 +1849,12 @@ modify_auto_conf(const char *data_dir, KeyValueList *items)
 			 * (unlikely) event that a repmgr built against one of those versions
 			 * is being used against Pg 12 and later.
 			 */
-			// XXX check return values
+
 #if (PG_ACTUAL_VERSION_NUM >= 100000)
-			(void) durable_rename(auto_conf_tmp.data, auto_conf.data, LOG);
+			if (durable_rename(auto_conf_tmp.data, auto_conf.data, LOG) != 0)
+			{
+				success = false;
+			}
 #else
 			if (rename(auto_conf_tmp.data, auto_conf.data) < 0)
 			{
@@ -1940,7 +1881,7 @@ modify_auto_conf(const char *data_dir, KeyValueList *items)
  */
 
 static void
-parse_event_notifications_list(t_configuration_options *options, const char *arg)
+parse_event_notifications_list(EventNotificationList *event_notifications, const char *arg)
 {
 	const char *arg_ptr = NULL;
 	char		event_type_buf[MAXLEN] = "";
@@ -1972,16 +1913,16 @@ parse_event_notifications_list(t_configuration_options *options, const char *arg
 
 			strncpy(cell->event_type, event_type_buf, MAXLEN);
 
-			if (options->event_notifications.tail)
+			if (event_notifications->tail)
 			{
-				options->event_notifications.tail->next = cell;
+				event_notifications->tail->next = cell;
 			}
 			else
 			{
-				options->event_notifications.head = cell;
+				event_notifications->head = cell;
 			}
 
-			options->event_notifications.tail = cell;
+			event_notifications->tail = cell;
 
 			memset(event_type_buf, 0, MAXLEN);
 			dst_ptr = event_type_buf;
@@ -2000,14 +1941,14 @@ parse_event_notifications_list(t_configuration_options *options, const char *arg
 
 
 static void
-clear_event_notification_list(t_configuration_options *options)
+clear_event_notification_list(EventNotificationList *event_notifications)
 {
-	if (options->event_notifications.head != NULL)
+	if (event_notifications->head != NULL)
 	{
 		EventNotificationListCell *cell;
 		EventNotificationListCell *next_cell;
 
-		cell = options->event_notifications.head;
+		cell = event_notifications->head;
 
 		while (cell != NULL)
 		{
@@ -2016,6 +1957,9 @@ clear_event_notification_list(t_configuration_options *options)
 			cell = next_cell;
 		}
 	}
+
+	event_notifications->head = NULL;
+	event_notifications->tail = NULL;
 }
 
 
@@ -2112,16 +2056,11 @@ bool
 parse_pg_basebackup_options(const char *pg_basebackup_options, t_basebackup_options *backup_options, int server_version_num, ItemList *error_list)
 {
 	bool		backup_options_ok = true;
-
 	int			c = 0,
 				argc_item = 0;
-
 	char	  **argv_array = NULL;
-
 	int			optindex = 0;
-
 	struct option *long_options = NULL;
-
 
 	/*
 	 * We're only interested in these options.
@@ -2131,7 +2070,8 @@ parse_pg_basebackup_options(const char *pg_basebackup_options, t_basebackup_opti
 	{
 		{"slot", required_argument, NULL, 'S'},
 		{"wal-method", required_argument, NULL, 'X'},
-		{"no-slot", no_argument, NULL, 1},
+		{"waldir", required_argument, NULL, 1},
+		{"no-slot", no_argument, NULL, 2},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -2142,6 +2082,7 @@ parse_pg_basebackup_options(const char *pg_basebackup_options, t_basebackup_opti
 	{
 		{"slot", required_argument, NULL, 'S'},
 		{"xlog-method", required_argument, NULL, 'X'},
+		{"xlogdir", required_argument, NULL, 1},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -2175,10 +2116,13 @@ parse_pg_basebackup_options(const char *pg_basebackup_options, t_basebackup_opti
 				strncpy(backup_options->wal_method, optarg, MAXLEN);
 				break;
 			case 1:
+				strncpy(backup_options->waldir, optarg, MAXPGPATH);
+				break;
+			case 2:
 				backup_options->no_slot = true;
 				break;
 			case '?':
-				if (server_version_num >= 100000 && optopt == 1)
+				if (server_version_num >= 100000 && optopt == 2)
 				{
 					if (error_list != NULL)
 					{
@@ -2197,6 +2141,24 @@ parse_pg_basebackup_options(const char *pg_basebackup_options, t_basebackup_opti
 			item_list_append(error_list, "--no-slot cannot be used with -S/--slot");
 		}
 		backup_options_ok = false;
+	}
+
+	/*
+	 * If --waldir/--xlogdir provided, check it's an absolute path.
+	 */
+	if (backup_options->waldir[0] != '\0')
+	{
+		canonicalize_path(backup_options->waldir);
+		if (!is_absolute_path(backup_options->waldir))
+		{
+			if (error_list != NULL)
+			{
+				item_list_append_format(error_list,
+										"--%s must be provided with an absolute path",
+										server_version_num >= 100000 ? "waldir" : "xlogdir");
+			}
+			backup_options_ok = false;
+		}
 	}
 
 	free_parsed_argv(&argv_array);
@@ -2220,4 +2182,79 @@ print_connection_check_type(ConnectionCheckType type)
 
 	/* should never reach here */
 	return "UNKNOWN";
+}
+
+
+
+char *
+print_event_notification_list(EventNotificationList *list)
+{
+	PQExpBufferData buf;
+	char *ptr;
+	EventNotificationListCell *cell;
+
+	initPQExpBuffer(&buf);
+	cell = list->head;
+
+	while (cell != NULL)
+	{
+		appendPQExpBufferStr(&buf, cell->event_type);
+
+		if (cell->next)
+			appendPQExpBufferChar(&buf, ',');
+
+		cell = cell->next;
+	}
+
+	ptr = palloc0(strlen(buf.data) + 1);
+	strncpy(ptr, buf.data, strlen(buf.data));
+
+	termPQExpBuffer(&buf);
+
+	return ptr;
+}
+
+
+char *
+print_tablespace_mapping(TablespaceList *tablespace_mapping)
+{
+	TablespaceListCell *cell;
+	bool first = true;
+	PQExpBufferData buf;
+	char *ptr;
+
+	initPQExpBuffer(&buf);
+
+	for (cell = tablespace_mapping->head; cell; cell = cell->next)
+	{
+		if (first == true)
+			first = false;
+		else
+			appendPQExpBufferChar(&buf, ',');
+
+		appendPQExpBuffer(&buf, "%s=%s",
+						  cell->old_dir, cell->new_dir);
+	}
+
+	ptr = palloc0(strlen(buf.data) + 1);
+	strncpy(ptr, buf.data, strlen(buf.data));
+
+	termPQExpBuffer(&buf);
+
+	return ptr;
+}
+
+
+const char *
+format_failover_mode(failover_mode_opt failover)
+{
+	switch (failover)
+	{
+		case FAILOVER_MANUAL:
+			return "manual";
+		case FAILOVER_AUTOMATIC:
+			return "automatic";
+		default:
+			return "unknown failover mode";
+	}
 }

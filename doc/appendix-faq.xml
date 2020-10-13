@@ -22,6 +22,9 @@
           &repmgr; 5 is fundamentally the same code base as &repmgr; 4, but provides
           support for the revised replication configuration mechanism in PostgreSQL 12.
         </para>
+        <para>
+          Support for PostgreSQL 9.3 is no longer available from &repmgr; 5.2.
+        </para>
       </note>
       <para>
         &repmgr; 3.x builds on the improved replication facilities added
@@ -347,6 +350,9 @@
         and earlier) with the absolute path to the WAL directory in <varname>pg_basebackup_options</varname>.
         For more details see <xref linkend="cloning-advanced-pg-basebackup-options"/>.
       </para>
+      <para>
+        In &repmgr; 5.2 and later, this setting will also be honoured when cloning from Barman.
+      </para>
     </sect2>
 
     <sect2 id="faq-repmgr-events-no-fkey" xreflabel="No foreign key on node_id in repmgr.events">
@@ -373,6 +379,22 @@
       </para>
     </sect2>
 
+    <sect2 id="faq-repmgr-exclude-metadata-from-dump" xreflabel="Excluding repmgr metadata from pg_dump output">
+      <title>How can I exclude &repmgr; metadata from <application>pg_dump</application> output?</title>
+      <para>
+        Beginning with &repmgr; 5.2, the metadata tables associated with the &repmgr; extension
+        (<literal>repmgr.nodes</literal>, <literal>repmgr.events</literal> and <literal>repmgr.monitoring_history</literal>)
+        have been marked as dumpable as they contain configuration and user-generated data.
+      </para>
+      <para>
+        To exclude these from <application>pg_dump</application> output, add the flag <option>--exclude-schema=repmgr</option>.
+      </para>
+      <para>
+        To exclude individual &repmgr; metadata tables from <application>pg_dump</application> output, add the flag
+        e.g. <option>--exclude-table=repmgr.monitoring_history</option>. This flag can be provided multiple times
+        to exclude individual tables,
+      </para>
+    </sect2>
 
   </sect1>
 

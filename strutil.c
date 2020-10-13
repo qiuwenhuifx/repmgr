@@ -386,10 +386,7 @@ output_check_status(CheckStatus status)
 	}
 
 	return "UNKNOWN";
-
 }
-
-
 
 
 /*
@@ -433,7 +430,6 @@ escape_string(PGconn *conn, const char *string)
 /*
  * simple function to escape double quotes only
  */
-
 void
 escape_double_quotes(char *string, PQExpBufferData *out)
 {
@@ -563,4 +559,11 @@ parse_follow_command(char *parsed_command, char *template, int node_id)
 	*dst_ptr = '\0';
 
 	return;
+}
+
+
+const char *
+format_bool(bool value)
+{
+	return value == true ? "true" : "false";
 }

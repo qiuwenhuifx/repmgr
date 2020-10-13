@@ -74,8 +74,8 @@
 #include "log.h"
 #include "sysutils.h"
 
-#define MIN_SUPPORTED_VERSION		"9.3"
-#define MIN_SUPPORTED_VERSION_NUM	90300
+#define MIN_SUPPORTED_VERSION		"9.4"
+#define MIN_SUPPORTED_VERSION_NUM	90400
 
 #define REPLICATION_TYPE_PHYSICAL 1
 
@@ -84,6 +84,7 @@
 
 #define UNKNOWN_TIMELINE_ID -1
 #define UNKNOWN_SYSTEM_IDENTIFIER 0
+#define UNKNOWN_DATA_CHECKSUM_VERSION -1
 #define UNKNOWN_PID			-1
 #define UNKNOWN_REPLICATION_LAG	-1
 #define UNKNOWN_VALUE		-1
@@ -97,40 +98,57 @@
 #define ARCHIVE_STATUS_DIR_ERROR -1
 #define NO_DEGRADED_MONITORING_ELAPSED -1
 
+#define WALRECEIVER_DISABLE_TIMEOUT_VALUE    86400000 /* milliseconds */
+
 /*
- * various default values - ensure repmgr.conf.sample is update
- * if any of these are changed
+ * Default command line option parameter values
  */
-#define DEFAULT_LOCATION                     "default"
-#define DEFAULT_PRIORITY		             100
-#define DEFAULT_RECONNECTION_ATTEMPTS        6	 /* seconds */
-#define DEFAULT_RECONNECTION_INTERVAL        10  /* seconds */
-#define DEFAULT_MONITORING_INTERVAL          2	 /* seconds */
-#define DEFAULT_ASYNC_QUERY_TIMEOUT          60  /* seconds */
-#define DEFAULT_PRIMARY_NOTIFICATION_TIMEOUT 60  /* seconds */
+#define DEFAULT_WAIT_START                   30  /* seconds */
+
+/*
+ * Default configuration file parameter values - ensure repmgr.conf.sample
+ * is update if any of these are changed
+ */
+
+#define DEFAULT_USE_REPLICATION_SLOTS        false
+#define DEFAULT_USE_PRIMARY_CONNINFO_PASSWORD false
+#define DEFAULT_PROMOTE_CHECK_TIMEOUT        60  /* seconds */
+#define DEFAULT_PROMOTE_CHECK_INTERVAL       1   /* seconds */
 #define DEFAULT_PRIMARY_FOLLOW_TIMEOUT       60  /* seconds */
 #define DEFAULT_STANDBY_FOLLOW_TIMEOUT       30  /* seconds */
+#define DEFAULT_STANDBY_FOLLOW_RESTART       false
+#define DEFAULT_SHUTDOWN_CHECK_TIMEOUT       60  /* seconds */
+#define DEFAULT_STANDBY_RECONNECT_TIMEOUT    60  /* seconds */
+#define DEFAULT_NODE_REJOIN_TIMEOUT          60  /* seconds */
 #define DEFAULT_ARCHIVE_READY_WARNING        16  /* WAL files */
 #define DEFAULT_ARCHIVE_READY_CRITICAL       128 /* WAL files */
 #define	DEFAULT_REPLICATION_LAG_WARNING      300 /* seconds */
 #define DEFAULT_REPLICATION_LAG_CRITICAL     600 /* seconds */
 #define DEFAULT_WITNESS_SYNC_INTERVAL        15  /* seconds */
-#define DEFAULT_WAIT_START                   30  /* seconds */
-#define DEFAULT_PROMOTE_CHECK_TIMEOUT        60  /* seconds */
-#define DEFAULT_PROMOTE_CHECK_INTERVAL       1   /* seconds */
-#define DEFAULT_SHUTDOWN_CHECK_TIMEOUT       60  /* seconds */
-#define DEFAULT_STANDBY_RECONNECT_TIMEOUT    60  /* seconds */
-#define DEFAULT_NODE_REJOIN_TIMEOUT          60  /* seconds */
 #define DEFAULT_WAL_RECEIVE_CHECK_TIMEOUT    30  /* seconds */
+#define DEFAULT_LOCATION                     "default"
+#define DEFAULT_PRIORITY                     100
+#define DEFAULT_MONITORING_INTERVAL          2	 /* seconds */
+#define DEFAULT_RECONNECTION_ATTEMPTS        6	 /* seconds */
+#define DEFAULT_RECONNECTION_INTERVAL        10  /* seconds */
+#define DEFAULT_MONITORING_HISTORY           false
+#define DEFAULT_DEGRADED_MONITORING_TIMEOUT  -1  /* seconds */
+#define DEFAULT_ASYNC_QUERY_TIMEOUT          60  /* seconds */
+#define DEFAULT_PRIMARY_NOTIFICATION_TIMEOUT 60  /* seconds */
+#define DEFAULT_REPMGRD_STANDBY_STARTUP_TIMEOUT -1 /*seconds */
+#define DEFAULT_STANDBY_DISCONNECT_ON_FAILOVER false
 #define DEFAULT_SIBLING_NODES_DISCONNECT_TIMEOUT 30 /* seconds */
+#define DEFAULT_CONNECTION_CHECK_TYPE        CHECK_PING
+#define DEFAULT_PRIMARY_VISIBILITY_CONSENSUS false
+#define DEFAULT_ALWAYS_PROMOTE               false
 #define DEFAULT_ELECTION_RERUN_INTERVAL      15  /* seconds */
 #define DEFAULT_CHILD_NODES_CHECK_INTERVAL   5   /* seconds */
 #define DEFAULT_CHILD_NODES_DISCONNECT_MIN_COUNT -1
 #define DEFAULT_CHILD_NODES_CONNECTED_MIN_COUNT -1
-#define DEFAULT_CHILD_NODES_DISCONNECT_TIMEOUT 30 /* seconds */
 #define DEFAULT_CHILD_NODES_CONNECTED_INCLUDE_WITNESS false
+#define DEFAULT_CHILD_NODES_DISCONNECT_TIMEOUT 30 /* seconds */
+#define DEFAULT_SSH_OPTIONS                  "-q -o ConnectTimeout=10"
 
-#define WALRECEIVER_DISABLE_TIMEOUT_VALUE    86400000 /* milliseconds */
 
 #ifndef RECOVERY_COMMAND_FILE
 #define RECOVERY_COMMAND_FILE "recovery.conf"
@@ -145,6 +163,6 @@
 #define TABLESPACE_MAP "tablespace_map"
 #endif
 
-
+#define REPMGR_URL "https://repmgr.org/"
 
 #endif							/* _REPMGR_H_ */

@@ -75,15 +75,13 @@
  * ============================ */
 
 t_runtime_options runtime_options = T_RUNTIME_OPTIONS_INITIALIZER;
-t_configuration_options config_file_options = T_CONFIGURATION_OPTIONS_INITIALIZER;
+
 
 /* conninfo params for the node we're operating on */
 t_conninfo_param_list source_conninfo = T_CONNINFO_PARAM_LIST_INITIALIZER;
 
 bool		config_file_required = true;
-char		pg_bindir[MAXLEN] = "";
-
-char		path_buf[MAXLEN] = "";
+char		pg_bindir[MAXPGPATH] = "";
 
 /*
  * if --node-id/--node-name provided, place that node's record here
@@ -279,6 +277,11 @@ main(int argc, char **argv)
 				runtime_options.detail = true;
 				break;
 
+				/* --dump-config */
+			case OPT_DUMP_CONFIG:
+				runtime_options.dump_config = true;
+				break;
+
 				/*----------------------------
 				 * database connection options
 				 *----------------------------
@@ -435,6 +438,10 @@ main(int argc, char **argv)
 				runtime_options.replication_conf_only = true;
 				break;
 
+				/* --verify-backup */
+			case OPT_VERIFY_BACKUP:
+				runtime_options.verify_backup = true;
+				break;
 
 				/*---------------------------
 				 * "standby register" options
@@ -539,6 +546,10 @@ main(int argc, char **argv)
 
 			case OPT_REPLICATION_CONFIG_OWNER:
 				runtime_options.replication_config_owner = true;
+				break;
+
+			case OPT_DB_CONNECTION:
+				runtime_options.db_connection = true;
 				break;
 
 				/*--------------------
@@ -701,9 +712,12 @@ main(int argc, char **argv)
 				if (strcmp(argv[optind - 1], "-?") == 0)
 				{
 					help_option = true;
-					break;
 				}
-				/* otherwise fall through to default */
+				else
+				{
+					option_error_found = true;
+				}
+				break;
 			default:    /* invalid option */
 				option_error_found = true;
 				break;
@@ -1073,8 +1087,25 @@ main(int argc, char **argv)
 	load_config(runtime_options.config_file,
 				runtime_options.verbose,
 				runtime_options.terse,
-				&config_file_options,
 				argv[0]);
+
+
+	/*
+	 * Handle options which must be executed without a repmgr command
+	 */
+	if (runtime_options.dump_config == true)
+	{
+		if (repmgr_command != NULL)
+		{
+			fprintf(stderr,
+					_("--dump-config cannot be used in combination with a repmgr command"));
+			exit(ERR_BAD_CONFIG);
+		}
+		dump_config();
+		exit(SUCCESS);
+	}
+
+
 
 	check_cli_parameters(action);
 
@@ -1196,7 +1227,7 @@ main(int argc, char **argv)
 
 	/*
 	 * If --dry-run specified, ensure log_level is at least LOG_INFO, regardless
-	 * of what's in the configuration file or -L/--log-level paremeter, otherwise
+	 * of what's in the configuration file or -L/--log-level parameter, otherwise
 	 * some or output might not be displayed.
 	 */
 	if (runtime_options.dry_run == true)
@@ -1213,8 +1244,6 @@ main(int argc, char **argv)
 	{
 		logger_set_level(LOG_ERROR);
 	}
-
-
 
 	/*
 	 * Node configuration information is not needed for all actions, with
@@ -2290,7 +2319,7 @@ format_node_status(t_node_info *node_info, PQExpBufferData *node_status, PQExpBu
 									node_info->node_id);
 		}
 		/* mismatch between reported upstream and upstream in local node's metadata */
-		else if(node_info->upstream_node_id != remote_node_rec.upstream_node_id)
+		else if (node_info->upstream_node_id != remote_node_rec.upstream_node_id)
 		{
 			appendPQExpBufferStr(upstream, "! ");
 
@@ -2351,6 +2380,7 @@ format_node_status(t_node_info *node_info, PQExpBufferData *node_status, PQExpBu
 			 * connected to the upstream
 			 */
 			NodeAttached attached_to_upstream = NODE_ATTACHED_UNKNOWN;
+			char *replication_state = NULL;
 			t_node_info upstream_node_rec = T_NODE_INFO_INITIALIZER;
 			RecordStatus upstream_node_rec_found = get_node_record(node_info->conn,
 																   node_info->upstream_node_id,
@@ -2378,7 +2408,7 @@ format_node_status(t_node_info *node_info, PQExpBufferData *node_status, PQExpBu
 				}
 				else
 				{
-					attached_to_upstream = is_downstream_node_attached(upstream_conn, node_info->node_name);
+					attached_to_upstream = is_downstream_node_attached(upstream_conn, node_info->node_name, &replication_state);
 				}
 
 				PQfinish(upstream_conn);
@@ -2394,6 +2424,18 @@ format_node_status(t_node_info *node_info, PQExpBufferData *node_status, PQExpBu
 										upstream_node_rec.node_name,
 										upstream_node_rec.node_id);
 			}
+			if (attached_to_upstream == NODE_NOT_ATTACHED)
+			{
+				appendPQExpBufferStr(upstream, "? ");
+				item_list_append_format(warnings,
+										"node \"%s\" (ID: %i) attached to its upstream node \"%s\" (ID: %i) in state \"%s\"",
+										node_info->node_name,
+										node_info->node_id,
+										upstream_node_rec.node_name,
+										upstream_node_rec.node_id,
+										replication_state);
+			}
+
 			else if (attached_to_upstream == NODE_DETACHED)
 			{
 				appendPQExpBufferStr(upstream, "! ");
@@ -2662,6 +2704,8 @@ do_help(void)
 	printf(_("  -v, --verbose                       display additional log output (useful for debugging)\n"));
 
 	puts("");
+
+	printf(_("%s home page: <%s>\n"), "repmgr", REPMGR_URL);
 }
 
 
@@ -2903,30 +2947,6 @@ check_server_version(PGconn *conn, char *server_type, bool exit_on_error, char *
 }
 
 
-
-/*
- * check_93_config()
- *
- * Disable options not compatible with PostgreSQL 9.3
- */
-void
-check_93_config(void)
-{
-	if (config_file_options.recovery_min_apply_delay_provided == true)
-	{
-		config_file_options.recovery_min_apply_delay_provided = false;
-		log_warning(_("configuration file option \"recovery_min_apply_delay\" not compatible with PostgreSQL 9.3, ignoring"));
-	}
-
-	if (config_file_options.use_replication_slots == true)
-	{
-		config_file_options.use_replication_slots = false;
-		log_warning(_("configuration file option \"use_replication_slots\" not compatible with PostgreSQL 9.3, ignoring"));
-		log_hint(_("replication slots are available from PostgreSQL 9.4"));
-	}
-}
-
-
 int
 test_ssh_connection(char *host, char *remote_user)
 {
@@ -3039,7 +3059,6 @@ get_superuser_connection(PGconn **conn, PGconn **superuser_conn, PGconn **privil
 }
 
 
-
 standy_clone_mode
 get_standby_clone_mode(void)
 {
@@ -3054,12 +3073,11 @@ get_standby_clone_mode(void)
 }
 
 
-char *
-make_pg_path(const char *file)
+void
+make_pg_path(PQExpBufferData *buf, const char *file)
 {
-	maxlen_snprintf(path_buf, "%s%s", pg_bindir, file);
-
-	return path_buf;
+	appendPQExpBuffer(buf, "%s%s",
+					  pg_bindir, file);
 }
 
 
@@ -3120,15 +3138,12 @@ copy_remote_files(char *host, char *remote_user, char *remote_path,
 		appendPQExpBufferStr(&rsync_flags,
 							 " --exclude=recovery.conf --exclude=recovery.done");
 
-		if (server_version_num >= 90400)
-		{
-			/*
-			 * Ideally we'd use PG_AUTOCONF_FILENAME from utils/guc.h, but
-			 * that has too many dependencies for a mere client program.
-			 */
-			appendPQExpBuffer(&rsync_flags, " --exclude=%s.tmp",
-							  PG_AUTOCONF_FILENAME);
-		}
+		/*
+		 * Ideally we'd use PG_AUTOCONF_FILENAME from utils/guc.h, but
+		 * that has too many dependencies for a mere client program.
+		 */
+		appendPQExpBuffer(&rsync_flags, " --exclude=%s.tmp",
+						  PG_AUTOCONF_FILENAME);
 
 		/* Temporary files which we don't want, if they exist */
 		appendPQExpBuffer(&rsync_flags, " --exclude=%s*",
@@ -3139,16 +3154,16 @@ copy_remote_files(char *host, char *remote_user, char *remote_path,
 		if (server_version_num >= 100000)
 		{
 			appendPQExpBufferStr(&rsync_flags,
-								 " --exclude=pg_wal/*");
+								 " --exclude=pg_wal/* --exclude=log/*");
 		}
 		else
 		{
 			appendPQExpBufferStr(&rsync_flags,
-								 " --exclude=pg_xlog/*");
+								 " --exclude=pg_xlog/* --exclude=pg_log/*");
 		}
 
 		appendPQExpBufferStr(&rsync_flags,
-							 " --exclude=pg_log/* --exclude=pg_stat_tmp/*");
+							 " --exclude=pg_stat_tmp/*");
 
 		maxlen_snprintf(script, "rsync %s %s:%s/* %s",
 						rsync_flags.data, host_string, remote_path, local_path);
@@ -3275,9 +3290,10 @@ get_server_action(t_server_action action, char *script, char *data_dir)
 				{
 					initPQExpBuffer(&command);
 
+					make_pg_path(&command, "pg_ctl");
+
 					appendPQExpBuffer(&command,
-									  "%s %s -w -D ",
-									  make_pg_path("pg_ctl"),
+									  " %s -w -D ",
 									  config_file_options.pg_ctl_options);
 
 					appendShellString(&command,
@@ -3305,9 +3321,10 @@ get_server_action(t_server_action action, char *script, char *data_dir)
 				else
 				{
 					initPQExpBuffer(&command);
+					make_pg_path(&command, "pg_ctl");
+
 					appendPQExpBuffer(&command,
-									  "%s %s -D ",
-									  make_pg_path("pg_ctl"),
+									  " %s -D ",
 									  config_file_options.pg_ctl_options);
 
 					appendShellString(&command,
@@ -3340,9 +3357,11 @@ get_server_action(t_server_action action, char *script, char *data_dir)
 				else
 				{
 					initPQExpBuffer(&command);
+
+					make_pg_path(&command, "pg_ctl");
+
 					appendPQExpBuffer(&command,
-									  "%s %s -w -D ",
-									  make_pg_path("pg_ctl"),
+									  " %s -w -D ",
 									  config_file_options.pg_ctl_options);
 
 					appendShellString(&command,
@@ -3368,9 +3387,11 @@ get_server_action(t_server_action action, char *script, char *data_dir)
 				else
 				{
 					initPQExpBuffer(&command);
+
+					make_pg_path(&command, "pg_ctl");
+
 					appendPQExpBuffer(&command,
-									  "%s %s -w -D ",
-									  make_pg_path("pg_ctl"),
+									  " %s -w -D ",
 									  config_file_options.pg_ctl_options);
 
 					appendShellString(&command,
@@ -3397,9 +3418,11 @@ get_server_action(t_server_action action, char *script, char *data_dir)
 				else
 				{
 					initPQExpBuffer(&command);
+
+					make_pg_path(&command, "pg_ctl");
+
 					appendPQExpBuffer(&command,
-									  "%s %s -w -D ",
-									  make_pg_path("pg_ctl"),
+									  " %s -w -D ",
 									  config_file_options.pg_ctl_options);
 
 					appendShellString(&command,
@@ -3573,27 +3596,6 @@ can_use_pg_rewind(PGconn *conn, const char *data_directory, PQExpBufferData *rea
 {
 	bool		can_use = true;
 
-	/* wal_log_hints not available in 9.3, so just determine if data checksums enabled */
-	if (PQserverVersion(conn) < 90400)
-	{
-		int			data_checksum_version = get_data_checksum_version(data_directory);
-
-		if (data_checksum_version < 0)
-		{
-			appendPQExpBuffer(reason,
-							  _("unable to determine data checksum version"));
-			can_use = false;
-		}
-		else if (data_checksum_version == 0)
-		{
-			appendPQExpBuffer(reason,
-							  _("this cluster was initialised without data checksums"));
-			can_use = false;
-		}
-
-		return can_use;
-	}
-
 	/* "full_page_writes" must be on in any case */
 	if (guc_set(conn, "full_page_writes", "=", "off"))
 	{
@@ -3613,7 +3615,7 @@ can_use_pg_rewind(PGconn *conn, const char *data_directory, PQExpBufferData *rea
 	{
 		int			data_checksum_version = get_data_checksum_version(data_directory);
 
-		if (data_checksum_version < 0)
+		if (data_checksum_version == UNKNOWN_DATA_CHECKSUM_VERSION)
 		{
 			if (can_use == false)
 				appendPQExpBuffer(reason, "; ");
@@ -3638,8 +3640,64 @@ can_use_pg_rewind(PGconn *conn, const char *data_directory, PQExpBufferData *rea
 }
 
 
-// provided connection should be for the normal repmgr user
-// upstream_node_record may be NULL or initialised to default values
+void
+make_standby_signal_path(char *buf)
+{
+	snprintf(buf, MAXPGPATH,
+			 "%s/%s",
+			 config_file_options.data_directory,
+			 STANDBY_SIGNAL_FILE);
+}
+
+/*
+ * create standby.signal (PostgreSQL 12 and later)
+ */
+bool
+write_standby_signal(void)
+{
+	char	    standby_signal_file_path[MAXPGPATH] = "";
+	FILE	   *file;
+	mode_t		um;
+
+	make_standby_signal_path(standby_signal_file_path);
+
+	/* Set umask to 0600 */
+	um = umask((~(S_IRUSR | S_IWUSR)) & (S_IRWXG | S_IRWXO));
+	file = fopen(standby_signal_file_path, "w");
+	umask(um);
+
+	if (file == NULL)
+	{
+		log_error(_("unable to create %s file at \"%s\""),
+				  STANDBY_SIGNAL_FILE,
+				  standby_signal_file_path);
+		log_detail("%s", strerror(errno));
+
+		return false;
+	}
+
+	if (fputs("# created by repmgr\n", file) == EOF)
+	{
+		log_error(_("unable to write to %s file at \"%s\""),
+				  STANDBY_SIGNAL_FILE,
+				  standby_signal_file_path);
+		fclose(file);
+
+		return false;
+	}
+
+	fclose(file);
+
+	return true;
+}
+
+
+/*
+ * NOTE:
+ *  - the provided connection should be for the normal repmgr user
+ *  - if upstream_node_record is not NULL, its "repluser" entry, if
+ *    set, will be used as the fallback replication user
+ */
 bool
 create_replication_slot(PGconn *conn, char *slot_name, t_node_info *upstream_node_record, PQExpBufferData *error_msg)
 {
@@ -3986,8 +4044,10 @@ check_standby_join(PGconn *upstream_conn, t_node_info *upstream_node_record, t_n
 
 	 for (; i < config_file_options.node_rejoin_timeout; i++)
 	 {
+		 char *node_state = NULL;
 		 NodeAttached node_attached = is_downstream_node_attached(upstream_conn,
-																  standby_node_record->node_name);
+																  standby_node_record->node_name,
+																  &node_state);
 		 if (node_attached == NODE_ATTACHED)
 		 {
 			 log_verbose(LOG_INFO, _("node \"%s\" (ID: %i) has attached to its upstream node"),
@@ -4004,9 +4064,19 @@ check_standby_join(PGconn *upstream_conn, t_node_info *upstream_node_record, t_n
 					  i + 1,
 					  config_file_options.node_rejoin_timeout);
 
-			 log_detail(_("checking for record in node \"%s\"'s \"pg_stat_replication\" table where \"application_name\" is \"%s\""),
-						upstream_node_record->node_name,
-						standby_node_record->node_name);
+			 if (node_attached == NODE_NOT_ATTACHED)
+			 {
+				 log_detail(_("node \"%s\" (ID: %i) is currrently attached to its upstream node in state \"%s\""),
+							upstream_node_record->node_name,
+							standby_node_record->node_id,
+							node_state);
+			 }
+			 else
+			 {
+				 log_detail(_("checking for record in node \"%s\"'s \"pg_stat_replication\" table where \"application_name\" is \"%s\""),
+							upstream_node_record->node_name,
+							standby_node_record->node_name);
+			 }
 		 }
 		 else
 		 {
@@ -4026,7 +4096,7 @@ check_standby_join(PGconn *upstream_conn, t_node_info *upstream_node_record, t_n
 
 /*
  * Here we'll perform some timeline sanity checks to ensure the follow target
- * can actually be followed.
+ * can actually be followed or rejoined.
  *
  * See also comment for check_node_can_follow() in repmgrd-physical.c .
  */
@@ -4066,10 +4136,31 @@ check_node_can_attach(TimeLineID local_tli, XLogRecPtr local_xlogpos, PGconn *fo
 	local_system_identifier = get_system_identifier(config_file_options.data_directory);
 
 	/*
-	 * Check for thing that should never happen, but expect the unexpected anyway.
+	 * Check for things that should never happen, but expect the unexpected anyway.
 	 */
-	if (follow_target_identification.system_identifier != local_system_identifier)
+
+	if (local_system_identifier == UNKNOWN_SYSTEM_IDENTIFIER)
 	{
+		/*
+		 * We don't return immediately here so subsequent checks can be
+		 * made, but indicate the node will not be able to rejoin.
+		 */
+		success = false;
+		if (runtime_options.dry_run == true)
+		{
+			log_warning(_("unable to retrieve system identifier from pg_control"));
+		}
+		else
+		{
+			log_error(_("unable to retrieve system identifier from pg_control, aborting"));
+		}
+	}
+	else if (follow_target_identification.system_identifier != local_system_identifier)
+	{
+		/*
+		 * It's never going to be possible to rejoin a node from another cluster,
+		 * so no need to bother with further checks.
+		 */
 		log_error(_("this node is not part of the %s target node's replication cluster"), action);
 		log_detail(_("this node's system identifier is %lu, %s target node's system identifier is %lu"),
 				   local_system_identifier,
@@ -4078,8 +4169,7 @@ check_node_can_attach(TimeLineID local_tli, XLogRecPtr local_xlogpos, PGconn *fo
 		PQfinish(follow_target_repl_conn);
 		return false;
 	}
-
-	if (runtime_options.dry_run == true)
+	else if (runtime_options.dry_run == true)
 	{
 		log_info(_("local and %s target system identifiers match"), action);
 		log_detail(_("system identifier is %lu"), local_system_identifier);
@@ -4092,20 +4182,64 @@ check_node_can_attach(TimeLineID local_tli, XLogRecPtr local_xlogpos, PGconn *fo
 				action,
 				follow_target_identification.timeline);
 
-	/* upstream's timeline is lower than ours - impossible case */
+	/*
+	 * The upstream's timeline is lower than ours - we cannot follow, and rejoin
+	 * requires PostgreSQL 9.6 and later.
+	 */
 	if (follow_target_identification.timeline < local_tli)
 	{
-		log_error(_("this node's timeline is ahead of the %s target node's timeline"), action);
-		log_detail(_("this node's timeline is %i, %s target node's timeline is %i"),
-				   local_tli,
-				   action,
-				   follow_target_identification.timeline);
-		PQfinish(follow_target_repl_conn);
-		return false;
+		/*
+		 * "repmgr standby follow" is impossible in this case
+		 */
+		if (is_rejoin == false)
+		{
+			log_error(_("this node's timeline is ahead of the %s target node's timeline"), action);
+			log_detail(_("this node's timeline is %i, %s target node's timeline is %i"),
+					   local_tli,
+					   action,
+					   follow_target_identification.timeline);
+
+			if (PQserverVersion(follow_target_conn) >= 90600)
+			{
+				log_hint(_("use \"repmgr node rejoin --force-rewind\" to reattach this node"));
+			}
+
+			PQfinish(follow_target_repl_conn);
+			return false;
+		}
+
+		/*
+		 * pg_rewind can only rejoin to a lower timeline from PostgreSQL 9.6
+		 */
+		if (PQserverVersion(follow_target_conn) < 90600)
+		{
+			log_error(_("this node's timeline is ahead of the %s target node's timeline"), action);
+			log_detail(_("this node's timeline is %i, %s target node's timeline is %i"),
+					   local_tli,
+					   action,
+					   follow_target_identification.timeline);
+
+			if (runtime_options.force_rewind_used == true)
+			{
+				log_hint(_("pg_rewind can only be used to rejoin to a node with a lower timeline from PostgreSQL 9.6"));
+			}
+
+			PQfinish(follow_target_repl_conn);
+			return false;
+		}
+
+		if (runtime_options.force_rewind_used == false)
+		{
+			log_notice(_("pg_rewind execution required for this node to attach to rejoin target node %i"),
+					   follow_target_node_record->node_id);
+			log_hint(_("provide --force-rewind"));
+			PQfinish(follow_target_repl_conn);
+			return false;
+		}
 	}
 
 	/* timelines are the same - check relative positions */
-	if (follow_target_identification.timeline == local_tli)
+	else if (follow_target_identification.timeline == local_tli)
 	{
 		XLogRecPtr follow_target_xlogpos = get_node_current_lsn(follow_target_conn);
 
@@ -4126,11 +4260,25 @@ check_node_can_attach(TimeLineID local_tli, XLogRecPtr local_xlogpos, PGconn *fo
 		}
 		else
 		{
-			log_error(_("this node is ahead of the %s target"), action);
+			/*
+			 * Unable to follow or join to a node we're ahead of, if we're on the
+			 * same timeline. Also, pg_rewind does not detect this situation,
+			 * as there is no definitive fork point.
+			 *
+			 * Note that Pg will still happily attach to the upstream in state "streaming"
+			 * for a while but then detach with an endless stream of
+			 * "record with incorrect prev-link" errors.
+			 */
+			log_error(_("this node ahead of the %s target on the same timeline (%i)"), action, local_tli);
 			log_detail(_("local node lsn is %X/%X, %s target lsn is %X/%X"),
 					   format_lsn(local_xlogpos),
 					   action,
 					   format_lsn(follow_target_xlogpos));
+
+			if (is_rejoin == true)
+			{
+				log_hint(_("the --force-rewind option is ineffective in this case"));
+			}
 
 			success = false;
 		}

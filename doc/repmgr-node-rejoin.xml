@@ -43,7 +43,12 @@
       <programlisting>
       repmgr node rejoin -d '$conninfo'</programlisting>
 
-      where <literal>$conninfo</literal> is the conninfo string of any reachable node in the cluster.
+      where <literal>$conninfo</literal> is the PostgreSQL <literal>conninfo</literal> string of the
+      <emphasis>current</emphasis> primary node (or that of any reachable node in the cluster, but
+      <emphasis>not</emphasis> the local node). This is so that &repmgr; can fetch up-to-date information
+      about the current state of the cluster.
+    </para>
+    <para>
       <filename>repmgr.conf</filename> for the stopped node *must* be supplied explicitly if not
       otherwise available.
     </para>
@@ -71,7 +76,7 @@
           </para>
           <para>
             It is only necessary to provide the <application>pg_rewind</application> path
-            if using PostgreSQL 9.3 or 9.4, and <application>pg_rewind</application>
+            if using PostgreSQL 9.4, and <application>pg_rewind</application>
             is not installed in the PostgreSQL <filename>bin</filename> directory.
           </para>
         </listitem>
@@ -207,9 +212,18 @@
       a standby to the current primary, not another standby.
     </para>
     <para>
-      The node must have been shut down cleanly; if this was not the case, it will
-      need to be manually started (remove any existing <filename>recovery.conf</filename> file first)
-      until it has reached a consistent recovery point, then shut down cleanly.
+      The node's PostgreSQL instance  must have been shut down cleanly. If this was not the
+      case, it will need to be started up until it has reached a consistent recovery point,
+      then shut down cleanly.
+    </para>
+    <para>
+      In PostgreSQL 13 and later, this will be done automatically
+      if the <option>--force-rewind</option> is provided (even if an actual rewind
+      is not necessary).
+    </para>
+    <para>
+      With PostgreSQL 12 and earlier, PostgreSQL will need to
+      be started and shut down manually; see below for the best way to do this.
     </para>
     <tip>
       <para>
@@ -221,11 +235,14 @@
           rm -f /var/lib/pgsql/data/recovery.conf
           postgres --single -D /var/lib/pgsql/data/ &lt; /dev/null</programlisting>
       </para>
+      <para>
+        Note that  <filename>standby.signal</filename> (PostgreSQL 11 and earlier:
+        <filename>recovery.conf</filename>) <emphasis>must</emphasis> be removed
+        from the data directory for PostgreSQL to be able to start in single
+        user mode.
+      </para>
     </tip>
-    <para>
-      &repmgr; will attempt to verify whether the node can rejoin as-is, or whether
-      <command>pg_rewind</command> must be used (see following section).
-    </para>
+
   </refsect1>
 
   <refsect1 id="repmgr-node-rejoin-pg-rewind" xreflabel="Using pg_rewind">
@@ -241,7 +258,7 @@
       <command>repmgr node rejoin</command> can optionally use <command>pg_rewind</command> to re-integrate a
       node which has diverged from the rest of the cluster, typically a failed primary.
       <command>pg_rewind</command> is available in PostgreSQL 9.5 and later as part of the core distribution,
-      and can be installed from external sources for PostgreSQL 9.3 and 9.4.
+      and can be installed from external sources for PostgreSQL 9.4.
     </para>
     <note>
       <para>
@@ -283,7 +300,15 @@
       to execute <command>pg_rewind</command> to ensure the node can be rejoined successfully.
     </para>
 
-    <important>
+    <refsect2 id="repmgr-node-rejoin-pg-rewind-config-files" xreflabel="pg_rewind and configuration files">
+
+      <title><command>pg_rewind</command> and configuration file retention</title>
+
+      <indexterm>
+        <primary>pg_rewind</primary>
+        <secondary>configuration file retention</secondary>
+      </indexterm>
+
       <para>
         Be aware that if <command>pg_rewind</command> is executed and actually performs a
         rewind operation, any configuration files in the PostgreSQL data directory will be
@@ -291,17 +316,27 @@
       </para>
       <para>
         To prevent this happening, provide a comma-separated list of files to retain
-        using the <literal>--config-file</literal> command line option; the specified files
+        using the <option>--config-file</option> command line option; the specified files
         will be archived in a temporary directory (whose parent directory can be specified with
-        <literal>--config-archive-dir</literal>) and restored once the rewind operation is
-        complete.
+        <option>--config-archive-dir</option>, default: <filename>/tmp</filename>)
+        and restored once the rewind operation is complete.
       </para>
-    </important>
+    </refsect2>
 
-    <para>
-      Example, first using <literal>--dry-run</literal>, then actually executing the
-      <literal>node rejoin command</literal>.
-    <programlisting>
+    <refsect2 id="repmgr-node-rejoin-pg-rewind-example" xreflabel="example using repmgr node rejoin and pg_rewind">
+
+      <title>Example using <command>repmgr node rejoin</command> and <command>pg_rewind</command></title>
+
+      <indexterm>
+        <primary>pg_rewind</primary>
+        <secondary>configuration file retention</secondary>
+      </indexterm>
+
+
+      <para>
+        Example, first using <option>--dry-run</option>, then actually executing the
+        <literal>node rejoin command</literal>.
+        <programlisting>
     $ repmgr node rejoin -f /etc/repmgr.conf -d 'host=node3 dbname=repmgr user=repmgr' \
         --config-files=postgresql.local.conf,postgresql.conf --verbose --force-rewind --dry-run
     INFO: replication connection to the rejoin target node was successful
@@ -317,17 +352,17 @@
       pg_rewind -D '/var/lib/postgresql/data' --source-server='host=node3 dbname=repmgr user=repmgr'
     INFO: prerequisites for executing NODE REJOIN are met</programlisting>
 
-    <note>
-      <para>
-        If <option>--force-rewind</option> is used with the <option>--dry-run</option> option,
-        this checks the prerequisites for using <application>pg_rewind</application>, but is
-        not an absolute guarantee that actually executing <application>pg_rewind</application>
-        will succeed. See also section <xref linkend="repmgr-node-rejoin-caveats"/> below.
-      </para>
+        <note>
+          <para>
+            If <option>--force-rewind</option> is used with the <option>--dry-run</option> option,
+            this checks the prerequisites for using <application>pg_rewind</application>, but is
+            not an absolute guarantee that actually executing <application>pg_rewind</application>
+            will succeed. See also section <xref linkend="repmgr-node-rejoin-caveats"/> below.
+          </para>
 
-    </note>
+        </note>
 
-    <programlisting>
+        <programlisting>
     $ repmgr node rejoin -f /etc/repmgr.conf -d 'host=node3 dbname=repmgr user=repmgr' \
         --config-files=postgresql.local.conf,postgresql.conf --verbose --force-rewind
     NOTICE: pg_rewind execution required for this node to attach to rejoin target node 3
@@ -339,8 +374,8 @@
     NOTICE: starting server using "pg_ctl -l /var/log/postgres/startup.log -w -D '/var/lib/pgsql/data' start"
     NOTICE: NODE REJOIN successful
     DETAIL: node 2 is now attached to node 3</programlisting>
-    </para>
-
+      </para>
+    </refsect2>
   </refsect1>
 
   <refsect1 id="repmgr-node-rejoin-caveats" xreflabel="Caveats">
@@ -370,6 +405,11 @@
      &quot;<literal>record with incorrect prev-link</literal>&quot;.
    </para>
    <para>
+     In PostgreSQL 9.5 and earlier, it is <emphasis>not</emphasis> possible to use
+     <application>pg_rewind</application> to attach to a target node with a lower
+     timeline than the local node.
+   </para>
+   <para>
      We strongly recommend running <command>repmgr node rejoin</command> with the
      <option>--dry-run</option> option first. Additionally it might be a good idea
      to execute the <application>pg_rewind</application> command displayed by
@@ -377,6 +417,51 @@
      option. Note that <application>pg_rewind</application> does not indicate that it
      is running in <option>--dry-run</option> mode.
    </para>
+
+   <warning>
+     <para>
+       In all current PostgreSQL versions (as of September 2020), <application>pg_rewind</application>
+       contains a corner-case bug which affects standbys in a very specific situation.
+     </para>
+     <para>
+       This situation occurs when a standby was shut down <emphasis>before</emphasis> its
+       primary node, and an attempt is made to attach this standby to another primary
+       in the same cluster (following a &quot;split brain&quot; situation where the standby
+       was connected to the wrong primary). In this case, &repmgr; will correctly determine
+       that <application>pg_rewind</application> should be executed, however
+       <application>pg_rewind</application> incorrectly decides that no action is necessary.
+     </para>
+     <para>
+       In this situation, &repmgr; will report something like:
+<programlisting>
+    NOTICE: pg_rewind execution required for this node to attach to rejoin target node 1
+    DETAIL: rejoin target server's timeline 3 forked off current database system timeline 2 before current recovery point 0/7019C10</programlisting>
+       but when executed, <application>pg_rewind</application> will report:
+<programlisting>
+    pg_rewind: servers diverged at WAL location 0/7015540 on timeline 2
+    pg_rewind: no rewind required</programlisting>
+       and if an attempt is made to attach the standby to the new primary, PostgreSQL logs on the standby
+       will contain errors like:
+<programlisting>
+    [2020-09-07 15:01:41 UTC]    LOG:  00000: replication terminated by primary server
+    [2020-09-07 15:01:41 UTC]    DETAIL:  End of WAL reached on timeline 2 at 0/7015540.
+    [2020-09-07 15:01:41 UTC]    LOG:  00000: new timeline 3 forked off current database system timeline 2 before current recovery point 0/7019C10</programlisting>
+     </para>
+     <para>
+       Currently it is not possible to resolve this situation using <application>pg_rewind</application>.
+       A <ulink url="https://www.postgresql.org/message-id/flat/CABvVfJU-LDWvoz4-Yow3Ay5LZYTuPD7eSjjE4kGyNZpXC6FrVQ@mail.gmail.com">patch</ulink>
+       has been submitted and will hopefully be included in a forthcoming PostgreSQL minor release.
+     </para>
+     <para>
+       As a workaround, start the primary server the standby was previously attached to,
+       and ensure the standby can be attached to it. If <application>pg_rewind</application> was actually executed,
+       it will have copied in the <filename>.history</filename> file from the target primary server; this must
+       be removed. <command>repmgr node rejoin</command> can then be used to attach the standby to the original
+       primary. Ensure any changes pending on the primary have propogated to the standby. Then shut down the primary
+       server <emphasis>first</emphasis>, before shutting down the standby. It should then be possible to
+       use <command>repmgr node rejoin</command> to attach the standby to the new primary.
+     </para>
+   </warning>
 
   </refsect1>
 

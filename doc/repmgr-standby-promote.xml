@@ -66,10 +66,10 @@
       Both values can be defined in <filename>repmgr.conf</filename>.
     </para>
 
-    <note>
+    <warning>
       <para>
-        If WAL replay is paused on the standby, and not all WAL files on the standby have been
-        replayed, &repmgr; will not attempt to promote it.
+        In PostgreSQL 12 and earlier, if WAL replay is paused on the standby, and not all
+        WAL files on the standby have been replayed, &repmgr; will not attempt to promote it.
       </para>
       <para>
         This is because if WAL replay is paused, PostgreSQL itself will not react to a promote command
@@ -81,7 +81,10 @@
         Note that if the standby is in archive recovery, &repmgr; will not be able to determine
         if more WAL is pending replay, and will abort the promotion attempt if WAL replay is paused.
       </para>
-    </note>
+      <para>
+        This restriction does <emphasis>not</emphasis> apply to PostgreSQL 13 and later.
+      </para>
+    </warning>
 
   </refsect1>
 
@@ -95,7 +98,6 @@
       NOTICE: promoting standby to primary
       DETAIL: promoting server "node2" (ID: 2) using "pg_ctl -l /var/log/postgres/startup.log -w -D '/var/lib/postgres/data' promote"
       server promoting
-      DEBUG: setting node 2 as primary and marking existing primary as failed
       NOTICE: STANDBY PROMOTE successful
       DETAIL: server "node2" (ID: 2) was successfully promoted to primary</programlisting>
     </para>
@@ -167,6 +169,42 @@
               &repmgrd;'s <option>promote_command</option>.
             </para>
           </important>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-F</option></term>
+        <term><option>--force</option></term>
+        <listitem>
+          <para>
+            Ignore warnings and continue anyway.
+          </para>
+          <para>
+            This option is relevant in the following situations if <option>--siblings-follow</option> was specified:
+            <itemizedlist spacing="compact" mark="bullet">
+              <listitem>
+                <simpara>
+                  If one or more sibling nodes was not reachable via SSH, the standby will be promoted anyway.
+                </simpara>
+              </listitem>
+              <listitem>
+                <simpara>
+                  If the promotion candidate has insufficient free walsenders to accomodate the standbys which will
+                  be attached to it, the standby will be promoted anyway.
+                </simpara>
+              </listitem>
+              <listitem>
+                <simpara>
+                  If replication slots are in use but the promotion candidate has insufficient free replication slots
+                  to accomodate the standbys which will be attached to it, the standby will be promoted anyway.
+                </simpara>
+              </listitem>
+            </itemizedlist>
+          </para>
+          <para>
+            Note that if the <option>-F</option>/<option>--force</option> option is used when any of the above
+            situations is encountered, the onus is on the user to manually resolve any resulting issues.
+          </para>
         </listitem>
       </varlistentry>
 

@@ -48,6 +48,7 @@ typedef struct
 	bool		no_wait;
 	bool		compact;
 	bool		detail;
+	bool		dump_config;
 
 	/* logging options */
 	char		log_level[MAXLEN];	/* overrides setting in repmgr.conf */
@@ -88,6 +89,7 @@ typedef struct
 	char		upstream_conninfo[MAXLEN];
 	bool		without_barman;
 	bool		replication_conf_only;
+	bool		verify_backup;
 
 	/* "standby clone"/"standby follow" options */
 	int			upstream_node_id;
@@ -120,6 +122,7 @@ typedef struct
 	bool		replication_connection;
 	bool		data_directory_config;
 	bool		replication_config_owner;
+	bool		db_connection;
 
 	/* "node rejoin" options */
 	char		config_files[MAXLEN];
@@ -140,7 +143,7 @@ typedef struct
 
 	/* following options for internal use */
 	char		config_archive_dir[MAXPGPATH];
-	OutputMode	output_mode;
+	OutputMode	output_mode; /* set through provision of --csv, --nagios or --optformat */
 	bool		disable_wal_receiver;
 	bool		enable_wal_receiver;
 } t_runtime_options;
@@ -149,7 +152,7 @@ typedef struct
 		/* configuration metadata */ \
 		false, false, false, false, false,	\
 		/* general configuration options */	\
-		"", false, false, "", -1, false, false, false, \
+		"", false, false, "", -1, false, false, false, false, \
 		/* logging options */ \
 		"", false, false, false, false,	\
 		/* output options */ \
@@ -162,7 +165,7 @@ typedef struct
 		UNKNOWN_NODE_ID, "", "", UNKNOWN_NODE_ID, \
 		/* "standby clone" options */ \
 		false, CONFIG_FILE_SAMEPATH, false, false, false, "", "", "", \
-		false, false, \
+		false, false, false, \
 		/* "standby clone"/"standby follow" options */ \
 		NO_UPSTREAM_NODE, \
 		/* "standby register" options */ \
@@ -172,7 +175,7 @@ typedef struct
 		/* "node status" options */ \
 		false, \
 		/* "node check" options */ \
-		false, false, false, false, false, false, false, false,	false, false, false, \
+		false, false, false, false, false, false, false, false,	false, false, false, false, \
 		/* "node rejoin" options */ \
 		"", \
 		/* "node service" options */ \
@@ -221,6 +224,13 @@ typedef enum
 	JOIN_FAIL_NO_REPLICATION
 } standy_join_status;
 
+typedef enum
+{
+	REMOTE_ERROR_UNKNOWN = -1,
+	REMOTE_ERROR_NONE,
+	REMOTE_ERROR_DB_CONNECTION,
+	REMOTE_ERROR_CONNINFO_PARSE
+} t_remote_error_type;
 
 typedef struct ColHeader
 {
@@ -232,21 +242,17 @@ typedef struct ColHeader
 
 
 
-/* global configuration structures */
+/* globally available configuration structures */
 extern t_runtime_options runtime_options;
-extern t_configuration_options config_file_options;
+extern t_conninfo_param_list source_conninfo;
+extern t_node_info target_node_info;
 
-t_conninfo_param_list source_conninfo;
-
-
+/* global variables */
 extern bool config_file_required;
 extern char pg_bindir[MAXLEN];
 
-extern t_node_info target_node_info;
-
-
+/* global functions */
 extern int	check_server_version(PGconn *conn, char *server_type, bool exit_on_error, char *server_version_string);
-extern void check_93_config(void);
 extern bool create_repmgr_extension(PGconn *conn);
 extern int	test_ssh_connection(char *host, char *remote_user);
 
@@ -257,7 +263,7 @@ extern int copy_remote_files(char *host, char *remote_user, char *remote_path,
 
 extern void print_error_list(ItemList *error_list, int log_level);
 
-extern char *make_pg_path(const char *file);
+extern void make_pg_path(PQExpBufferData *buf, const char *file);
 
 extern void get_superuser_connection(PGconn **conn, PGconn **superuser_conn, PGconn **privileged_conn);
 
@@ -276,6 +282,8 @@ extern void get_node_config_directory(char *config_dir_buf);
 extern void get_node_data_directory(char *data_dir_buf);
 extern void init_node_record(t_node_info *node_record);
 extern bool can_use_pg_rewind(PGconn *conn, const char *data_directory, PQExpBufferData *reason);
+extern void make_standby_signal_path(char *buf);
+extern bool write_standby_signal(void);
 
 extern bool create_replication_slot(PGconn *conn, char *slot_name, t_node_info *upstream_node_record, PQExpBufferData *error_msg);
 extern bool drop_replication_slot_if_exists(PGconn *conn, int node_id, char *slot_name);

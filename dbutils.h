@@ -119,9 +119,14 @@ typedef enum
 
 typedef enum
 {
+	/* unable to query "pg_stat_replication" or other error */
 	NODE_ATTACHED_UNKNOWN = -1,
-	NODE_DETACHED,
-	NODE_ATTACHED
+	/* node has record in "pg_stat_replication" and state is not "streaming" */
+	NODE_ATTACHED,
+	/* node has record in "pg_stat_replication" but state is not "streaming" */
+	NODE_NOT_ATTACHED,
+	/* node has no record in "pg_stat_replication" */
+	NODE_DETACHED
 } NodeAttached;
 
 typedef enum
@@ -413,6 +418,7 @@ void		conn_to_param_list(PGconn *conn, t_conninfo_param_list *param_list);
 void		param_set(t_conninfo_param_list *param_list, const char *param, const char *value);
 void		param_set_ine(t_conninfo_param_list *param_list, const char *param, const char *value);
 char	   *param_get(t_conninfo_param_list *param_list, const char *param);
+bool		validate_conninfo_string(const char *conninfo_str, char **errmsg);
 bool		parse_conninfo_string(const char *conninfo_str, t_conninfo_param_list *param_list, char **errmsg, bool ignore_local_params);
 char	   *param_list_to_string(t_conninfo_param_list *param_list);
 char	   *normalize_conninfo_string(const char *conninfo_str);
@@ -447,7 +453,7 @@ TimeLineHistoryEntry *get_timeline_history(PGconn *repl_conn, TimeLineID tli);
 
 /* user/role information functions */
 bool		can_execute_pg_promote(PGconn *conn);
-bool		connection_has_pg_settings(PGconn *conn);
+bool		connection_has_pg_monitor_role(PGconn *conn, const char *subrole);
 bool		is_replication_role(PGconn *conn, char *rolname);
 bool		is_superuser_connection(PGconn *conn, t_connection_user *userinfo);
 
@@ -490,6 +496,7 @@ bool		get_local_node_record(PGconn *conn, int node_id, t_node_info *node_info);
 bool		get_primary_node_record(PGconn *conn, t_node_info *node_info);
 
 bool		get_all_node_records(PGconn *conn, NodeInfoList *node_list);
+bool		get_all_nodes_count(PGconn *conn, int *count);
 void		get_downstream_node_records(PGconn *conn, int node_id, NodeInfoList *nodes);
 void		get_active_sibling_node_records(PGconn *conn, int node_id, int upstream_node_id, NodeInfoList *node_list);
 bool		get_child_nodes(PGconn *conn, int node_id, NodeInfoList *node_list);
@@ -589,7 +596,7 @@ bool		get_replication_info(PGconn *conn, t_server_type node_type, ReplInfo *repl
 int			get_replication_lag_seconds(PGconn *conn);
 TimeLineID	get_node_timeline(PGconn *conn, char *timeline_id_str);
 void		get_node_replication_stats(PGconn *conn, t_node_info *node_info);
-NodeAttached is_downstream_node_attached(PGconn *conn, char *node_name);
+NodeAttached is_downstream_node_attached(PGconn *conn, char *node_name, char **node_state);
 void		set_upstream_last_seen(PGconn *conn, int upstream_node_id);
 int			get_upstream_last_seen(PGconn *conn, t_server_type node_type);
 

@@ -175,7 +175,10 @@
     <programlisting>
       pg_basebackup_options='--wal-method=fetch'</programlisting>
 
-    and ensure that <literal>wal_keep_segments</literal> is set to an appropriately high value.
+    and ensure that <literal>wal_keep_segments</literal> (PostgreSQL 13 and later:
+    <literal>wal_keep_size</literal>) is set to an appropriately high value. Note
+    however that this is not a particularly reliable way of ensuring sufficient
+    WAL is retained and is not recommended.
     See the <ulink url="https://www.postgresql.org/docs/current/app-pgbasebackup.html">
     pg_basebackup</ulink> documentation for details.
    </para>
@@ -186,6 +189,25 @@
       with <literal>--xlog-method</literal>.
     </simpara>
    </note>
+  </refsect1>
+
+  <refsect1 id="repmgr-standby-clone-wal-directory">
+
+   <title>Placing WAL files into a different directory</title>
+
+   <para>
+     To ensure that WAL files are placed in a directory outside of the main data
+     directory (e.g. to keep them on a separate disk for performance reasons),
+     specify the location with  <option>--waldir</option>
+     (PostgreSQL 9.6 and earlier: <option>--xlogdir</option>) in
+     the <filename>repmgr.conf</filename> parameter <option>pg_basebackup_options</option>,
+     e.g.:
+     <programlisting>
+pg_basebackup_options='--waldir=/path/to/wal-directory'</programlisting>
+     This setting will also be honored by &repmgr; when cloning from Barman
+     (&repmgr; 5.2 and later).
+   </para>
+
   </refsect1>
 
 <!-- don't rename this id as it may be used in external links -->
@@ -370,6 +392,23 @@
           </para>
         </listitem>
       </varlistentry>
+
+      <varlistentry>
+        <term><option>--verify-backup</option></term>
+        <listitem>
+          <para>
+            <!-- update link after Pg13 release -->
+            Verify a cloned node using the
+            <ulink url="https://www.postgresql.org/docs/13/app-pgverifybackup.html">pg_verifybackup</ulink>
+            utility (PostgreSQL 13 and later).
+          </para>
+          <para>
+            This option can currently only be used when cloning directly from an upstream
+            node.
+          </para>
+        </listitem>
+      </varlistentry>
+
       <varlistentry>
         <term><option>--without-barman </option></term>
         <listitem>

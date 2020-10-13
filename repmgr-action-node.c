@@ -36,6 +36,8 @@ static bool copy_file(const char *src_file, const char *dest_file);
 static void format_archive_dir(PQExpBufferData *archive_dir);
 static t_server_action parse_server_action(const char *action);
 
+static void exit_optformat_error(const char *error, int errcode);
+
 static void _do_node_service_list_actions(t_server_action action);
 static void _do_node_status_is_shutdown_cleanly(void);
 static void _do_node_archive_config(void);
@@ -43,7 +45,7 @@ static void _do_node_restore_config(void);
 
 static void do_node_check_replication_connection(void);
 static CheckStatus do_node_check_archive_ready(PGconn *conn, OutputMode mode, CheckStatusList *list_output);
-static CheckStatus do_node_check_downstream(PGconn *conn, OutputMode mode, CheckStatusList *list_output);
+static CheckStatus do_node_check_downstream(PGconn *conn, OutputMode mode, t_node_info *node_info, CheckStatusList *list_output);
 static CheckStatus do_node_check_upstream(PGconn *conn, OutputMode mode, t_node_info *node_info, CheckStatusList *list_output);
 static CheckStatus do_node_check_replication_lag(PGconn *conn, OutputMode mode, t_node_info *node_info, CheckStatusList *list_output);
 static CheckStatus do_node_check_role(PGconn *conn, OutputMode mode, t_node_info *node_info, CheckStatusList *list_output);
@@ -51,6 +53,8 @@ static CheckStatus do_node_check_slots(PGconn *conn, OutputMode mode, t_node_inf
 static CheckStatus do_node_check_missing_slots(PGconn *conn, OutputMode mode, t_node_info *node_info, CheckStatusList *list_output);
 static CheckStatus do_node_check_data_directory(PGconn *conn, OutputMode mode, t_node_info *node_info, CheckStatusList *list_output);
 static CheckStatus do_node_check_replication_config_owner(PGconn *conn, OutputMode mode, t_node_info *node_info, CheckStatusList *list_output);
+static CheckStatus do_node_check_db_connection(PGconn *conn, OutputMode mode);
+
 /*
  * NODE STATUS
  *
@@ -81,7 +85,6 @@ do_node_status(void)
 	t_recovery_conf recovery_conf = T_RECOVERY_CONF_INITIALIZER;
 
 	char		data_dir[MAXPGPATH] = "";
-	int			server_version_num = UNKNOWN_SERVER_VERSION_NUM;
 	char		server_version_str[MAXVERSIONSTR] = "";
 
 	/*
@@ -99,7 +102,7 @@ do_node_status(void)
 	conn = establish_db_connection(config_file_options.conninfo, true);
 	strncpy(data_dir, config_file_options.data_directory, MAXPGPATH);
 
-	server_version_num = get_server_version(conn, server_version_str);
+	(void)get_server_version(conn, server_version_str);
 
 	/* check node exists  */
 
@@ -131,13 +134,22 @@ do_node_status(void)
 
 	if (runtime_options.verbose == true)
 	{
-		uint64		local_system_identifier = UNKNOWN_SYSTEM_IDENTIFIER;
+		uint64		local_system_identifier = get_system_identifier(config_file_options.data_directory);
 
-		local_system_identifier = get_system_identifier(config_file_options.data_directory);
-
-		key_value_list_set_format(&node_status,
-								  "System identifier",
-								  "%lu", local_system_identifier);
+		if (local_system_identifier == UNKNOWN_SYSTEM_IDENTIFIER)
+		{
+			key_value_list_set(&node_status,
+							   "System identifier",
+							   "unknown");
+			item_list_append_format(&warnings,
+									_("unable to retrieve system identifier from pg_control"));
+		}
+		else
+		{
+			key_value_list_set_format(&node_status,
+									  "System identifier",
+									  "%lu", local_system_identifier);
+		}
 	}
 
 	key_value_list_set(&node_status,
@@ -204,7 +216,16 @@ do_node_status(void)
 
 		if (enabled == false && recovery_type == RECTYPE_STANDBY)
 		{
-			appendPQExpBufferStr(&archiving_status, " (on standbys \"archive_mode\" must be set to \"always\" to be effective)");
+			if (PQserverVersion(conn) >= 90500)
+			{
+				appendPQExpBufferStr(&archiving_status,
+									 " (on standbys \"archive_mode\" must be set to \"always\" to be effective)");
+			}
+			else
+			{
+				appendPQExpBufferStr(&archiving_status,
+									 " (\"archive_mode\" has no effect on standbys)");
+			}
 		}
 
 		key_value_list_set(&node_status,
@@ -294,7 +315,7 @@ do_node_status(void)
 				continue;
 			}
 
-			if (is_downstream_node_attached(conn, node_cell->node_info->node_name) != NODE_ATTACHED)
+			if (is_downstream_node_attached(conn, node_cell->node_info->node_name, NULL) != NODE_ATTACHED)
 			{
 				missing_nodes_count++;
 				item_list_append_format(&missing_nodes,
@@ -321,13 +342,7 @@ do_node_status(void)
 		}
 	}
 
-	if (server_version_num < 90400)
-	{
-		key_value_list_set(&node_status,
-						   "Replication slots",
-						   "not available");
-	}
-	else if (node_info.max_replication_slots == 0)
+	if (node_info.max_replication_slots == 0)
 	{
 		key_value_list_set(&node_status,
 						   "Replication slots",
@@ -632,9 +647,17 @@ _do_node_status_is_shutdown_cleanly(void)
 			break;
 	}
 
-	/* check what pg_controldata says */
+	/* check what pg_control says */
 
-	db_state = get_db_state(config_file_options.data_directory);
+	if (get_db_state(config_file_options.data_directory, &db_state) == false)
+	{
+		/*
+		 * Unable to retrieve the database state from pg_control
+		 */
+		node_status = NODE_STATUS_UNKNOWN;
+		log_verbose(LOG_DEBUG, "unable to determine db state");
+		goto return_state;
+	}
 
 	log_verbose(LOG_DEBUG, "db state now: %s", describe_db_state(db_state));
 
@@ -653,20 +676,22 @@ _do_node_status_is_shutdown_cleanly(void)
 
 	checkPoint = get_latest_checkpoint_location(config_file_options.data_directory);
 
-	/* unable to read pg_control, don't know what's happening */
 	if (checkPoint == InvalidXLogRecPtr)
 	{
+		/* unable to read pg_control, don't know what's happening */
 		node_status = NODE_STATUS_UNKNOWN;
 	}
-
-	/*
-	 * if still "UNKNOWN" at this point, then the node must be cleanly shut
-	 * down
-	 */
 	else if (node_status == NODE_STATUS_UNKNOWN)
 	{
+		/*
+		 * if still "UNKNOWN" at this point, then the node must be cleanly shut
+		 * down
+		 */
 		node_status = NODE_STATUS_DOWN;
 	}
+
+
+return_state:
 
 	log_verbose(LOG_DEBUG, "node status determined as: %s",
 				print_node_status(node_status));
@@ -686,6 +711,26 @@ _do_node_status_is_shutdown_cleanly(void)
 	return;
 }
 
+static void
+exit_optformat_error(const char *error, int errcode)
+{
+	PQExpBufferData output;
+
+	Assert(runtime_options.output_mode == OM_OPTFORMAT);
+
+	initPQExpBuffer(&output);
+
+	appendPQExpBuffer(&output,
+					  "--error=%s",
+					  error);
+
+	printf("%s\n", output.data);
+
+	termPQExpBuffer(&output);
+
+	exit(errcode);
+}
+
 /*
  * Configuration file required
  */
@@ -702,6 +747,7 @@ do_node_check(void)
 	CheckStatusListCell *cell = NULL;
 
 	bool			issue_detected = false;
+	bool			exit_on_connection_error = true;
 
 	/* for internal use */
 	if (runtime_options.has_passfile == true)
@@ -711,10 +757,26 @@ do_node_check(void)
 		exit(return_code);
 	}
 
+	/* for use by "standby switchover" */
 	if (runtime_options.replication_connection == true)
 	{
 		do_node_check_replication_connection();
 		exit(SUCCESS);
+	}
+
+	if (runtime_options.db_connection == true)
+	{
+		exit_on_connection_error = false;
+	}
+
+	/*
+	 * If --optformat was provided, we'll assume this is a remote invocation
+	 * and instead of exiting with an error, we'll return an error string to
+	 * so the remote invoker will know what's happened.
+	 */
+	if (runtime_options.output_mode == OM_OPTFORMAT)
+	{
+		exit_on_connection_error = false;
 	}
 
 
@@ -732,6 +794,12 @@ do_node_check(void)
 
 		if (parse_success == false)
 		{
+			if (runtime_options.output_mode == OM_OPTFORMAT)
+			{
+				exit_optformat_error("CONNINFO_PARSE",
+									 ERR_BAD_CONFIG);
+			}
+
 			log_error(_("unable to parse conninfo string \"%s\" for local node"),
 					  config_file_options.conninfo);
 			log_detail("%s", errmsg);
@@ -749,16 +817,36 @@ do_node_check(void)
 				config_file_options.conninfo,
 				"user",
 				runtime_options.superuser,
-				true);
+				exit_on_connection_error);
 		}
 		else
 		{
-			conn = establish_db_connection_by_params(&node_conninfo, true);
+			conn = establish_db_connection_by_params(&node_conninfo, exit_on_connection_error);
 		}
 	}
 	else
 	{
-		conn = establish_db_connection_by_params(&source_conninfo, true);
+		conn = establish_db_connection_by_params(&source_conninfo, exit_on_connection_error);
+	}
+
+
+	/*
+	 * --db-connection option provided
+	 */
+	if (runtime_options.db_connection == true)
+	{
+		return_code = do_node_check_db_connection(conn, runtime_options.output_mode);
+		PQfinish(conn);
+		exit(return_code);
+	}
+
+	/*
+	 * If we've reached here, and the connection is invalid, then --optformat was provided
+	 */
+	if (PQstatus(conn) != CONNECTION_OK)
+	{
+		exit_optformat_error("DB_CONNECTION",
+							 ERR_DB_CONN);
 	}
 
 	if (get_node_record(conn, config_file_options.node_id, &node_info) != RECORD_FOUND)
@@ -797,6 +885,7 @@ do_node_check(void)
 	{
 		return_code = do_node_check_downstream(conn,
 											   runtime_options.output_mode,
+											   &node_info,
 											   NULL);
 		PQfinish(conn);
 		exit(return_code);
@@ -888,7 +977,7 @@ do_node_check(void)
 	if (do_node_check_upstream(conn, runtime_options.output_mode, &node_info, &status_list) != CHECK_STATUS_OK)
 		issue_detected = true;
 
-	if (do_node_check_downstream(conn, runtime_options.output_mode, &status_list) != CHECK_STATUS_OK)
+	if (do_node_check_downstream(conn, runtime_options.output_mode, &node_info, &status_list) != CHECK_STATUS_OK)
 		issue_detected = true;
 
 	if (do_node_check_slots(conn, runtime_options.output_mode, &node_info, &status_list) != CHECK_STATUS_OK)
@@ -986,7 +1075,15 @@ do_node_check_replication_connection(void)
 	}
 
 	/* retrieve remote node record from local database */
-	local_conn = establish_db_connection(config_file_options.conninfo, true);
+	local_conn = establish_db_connection(config_file_options.conninfo, false);
+
+	if (PQstatus(local_conn) != CONNECTION_OK)
+	{
+		appendPQExpBufferStr(&output, "CONNECTION_ERROR");
+		printf("%s\n", output.data);
+		termPQExpBuffer(&output);
+		return;
+	}
 
 	record_status = get_node_record(local_conn, runtime_options.remote_node_id, &node_record);
 	PQfinish(local_conn);
@@ -1183,7 +1280,7 @@ do_node_check_archive_ready(PGconn *conn, OutputMode mode, CheckStatusList *list
 
 
 static CheckStatus
-do_node_check_downstream(PGconn *conn, OutputMode mode, CheckStatusList *list_output)
+do_node_check_downstream(PGconn *conn, OutputMode mode, t_node_info *node_info, CheckStatusList *list_output)
 {
 	NodeInfoList downstream_nodes = T_NODE_INFO_LIST_INITIALIZER;
 	NodeInfoListCell *cell = NULL;
@@ -1217,7 +1314,7 @@ do_node_check_downstream(PGconn *conn, OutputMode mode, CheckStatusList *list_ou
 			continue;
 		}
 
-		if (is_downstream_node_attached(conn, cell->node_info->node_name) != NODE_ATTACHED)
+		if (is_downstream_node_attached(conn, cell->node_info->node_name, NULL) != NODE_ATTACHED)
 		{
 			missing_nodes_count++;
 			item_list_append_format(&missing_nodes,
@@ -1234,7 +1331,13 @@ do_node_check_downstream(PGconn *conn, OutputMode mode, CheckStatusList *list_ou
 		}
 	}
 
-	if (missing_nodes_count == 0)
+	if (node_info->type == WITNESS)
+	{
+		/* witness is not connecting to any upstream */
+		appendPQExpBufferStr(&details,
+							 _("N/A - node is a witness"));
+	}
+	else if (missing_nodes_count == 0)
 	{
 		if (expected_nodes_count == 0)
 			appendPQExpBufferStr(&details,
@@ -1367,7 +1470,13 @@ do_node_check_upstream(PGconn *conn, OutputMode mode, t_node_info *node_info, Ch
 
 	initPQExpBuffer(&details);
 
-	if (get_node_record(conn, node_info->upstream_node_id, &upstream_node_info) != RECORD_FOUND)
+	if (node_info->type == WITNESS)
+	{
+		/* witness is not connecting to any upstream */
+		appendPQExpBufferStr(&details,
+							 _("N/A - node is a witness"));
+	}
+	else if (get_node_record(conn, node_info->upstream_node_id, &upstream_node_info) != RECORD_FOUND)
 	{
 		if (get_recovery_type(conn) == RECTYPE_STANDBY)
 		{
@@ -1388,7 +1497,7 @@ do_node_check_upstream(PGconn *conn, OutputMode mode, t_node_info *node_info, Ch
 		upstream_conn = establish_db_connection(upstream_node_info.conninfo, true);
 
 		/* check our node is connected */
-		if (is_downstream_node_attached(upstream_conn, config_file_options.node_name) != NODE_ATTACHED)
+		if (is_downstream_node_attached(upstream_conn, config_file_options.node_name, NULL) != NODE_ATTACHED)
 		{
 			appendPQExpBuffer(&details,
 							  _("node \"%s\" (ID: %i) is not attached to expected upstream node \"%s\" (ID: %i)"),
@@ -1417,6 +1526,7 @@ do_node_check_upstream(PGconn *conn, OutputMode mode, t_node_info *node_info, Ch
 					   output_check_status(status),
 					   details.data);
 			}
+			break;
 		case OM_TEXT:
 			if (list_output != NULL)
 			{
@@ -1746,12 +1856,7 @@ do_node_check_slots(PGconn *conn, OutputMode mode, t_node_info *node_info, Check
 
 	initPQExpBuffer(&details);
 
-	if (PQserverVersion(conn) < 90400)
-	{
-		appendPQExpBufferStr(&details,
-							 _("replication slots not available for this PostgreSQL version"));
-	}
-	else if (node_info->total_replication_slots == 0)
+	if (node_info->total_replication_slots == 0)
 	{
 		appendPQExpBufferStr(&details,
 							 _("node has no physical replication slots"));
@@ -1822,50 +1927,42 @@ do_node_check_missing_slots(PGconn *conn, OutputMode mode, t_node_info *node_inf
 
 	initPQExpBuffer(&details);
 
-	if (PQserverVersion(conn) < 90400)
+	get_downstream_nodes_with_missing_slot(conn,
+										   config_file_options.node_id,
+										   &missing_slots);
+
+	if (missing_slots.node_count == 0)
 	{
 		appendPQExpBufferStr(&details,
-							 _("replication slots not available for this PostgreSQL version"));
+							 _("node has no missing physical replication slots"));
 	}
 	else
 	{
-		get_downstream_nodes_with_missing_slot(conn,
-											   config_file_options.node_id,
-											   &missing_slots);
+		NodeInfoListCell *missing_slot_cell = NULL;
+		bool first_element = true;
 
-		if (missing_slots.node_count == 0)
+		status = CHECK_STATUS_CRITICAL;
+
+		appendPQExpBuffer(&details,
+						  _("%i physical replication slots are missing"),
+						  missing_slots.node_count);
+
+		if (missing_slots.node_count)
 		{
-			appendPQExpBufferStr(&details,
-								 _("node has no missing physical replication slots"));
-		}
-		else
-		{
-			NodeInfoListCell *missing_slot_cell = NULL;
-			bool first_element = true;
+			appendPQExpBufferStr(&details, ": ");
 
-			status = CHECK_STATUS_CRITICAL;
-
-			appendPQExpBuffer(&details,
-							  _("%i physical replication slots are missing"),
-							  missing_slots.node_count);
-
-			if (missing_slots.node_count)
+			for (missing_slot_cell = missing_slots.head; missing_slot_cell; missing_slot_cell = missing_slot_cell->next)
 			{
-				appendPQExpBufferStr(&details, ": ");
-
-				for (missing_slot_cell = missing_slots.head; missing_slot_cell; missing_slot_cell = missing_slot_cell->next)
+				if (first_element == true)
 				{
-					if (first_element == true)
-					{
-						first_element = false;
-					}
-					else
-					{
-						appendPQExpBufferStr(&details, ", ");
-					}
-
-					appendPQExpBufferStr(&details, missing_slot_cell->node_info->slot_name);
+					first_element = false;
 				}
+				else
+				{
+					appendPQExpBufferStr(&details, ", ");
+				}
+
+				appendPQExpBufferStr(&details, missing_slot_cell->node_info->slot_name);
 			}
 		}
 	}
@@ -1948,7 +2045,7 @@ do_node_check_data_directory(PGconn *conn, OutputMode mode, t_node_info *node_in
 	 * Check actual data directory matches that in repmgr.conf; note this requires
 	 * a superuser connection
 	 */
-	if (connection_has_pg_settings(conn) == true)
+	if (connection_has_pg_monitor_role(conn, "pg_read_all_settings") == true)
 	{
 		/* we expect to have a database connection */
 		if (get_pg_setting(conn, "data_directory", actual_data_directory) == false)
@@ -2092,6 +2189,72 @@ CheckStatus do_node_check_replication_config_owner(PGconn *conn, OutputMode mode
 
 	printf("--replication-config-owner=%s\n",
 		   output_check_status(status));
+
+	return status;
+}
+
+
+/*
+ * This is not included in the general list output
+ */
+static CheckStatus
+do_node_check_db_connection(PGconn *conn, OutputMode mode)
+{
+	CheckStatus status = CHECK_STATUS_OK;
+	PQExpBufferData details;
+
+	if (mode == OM_CSV)
+	{
+		log_error(_("--csv output not provided with --db-connection option"));
+		PQfinish(conn);
+		exit(ERR_BAD_CONFIG);
+	}
+
+	/* This check is for configuration diagnostics only */
+	if (mode == OM_NAGIOS)
+	{
+		log_error(_("--nagios output not provided with --db-connection option"));
+		PQfinish(conn);
+		exit(ERR_BAD_CONFIG);
+	}
+
+	initPQExpBuffer(&details);
+
+	if (PQstatus(conn) != CONNECTION_OK)
+	{
+		t_conninfo_param_list conninfo = T_CONNINFO_PARAM_LIST_INITIALIZER;
+		int c;
+
+		status = CHECK_STATUS_CRITICAL;
+		initialize_conninfo_params(&conninfo, false);
+		conn_to_param_list(conn, &conninfo);
+
+		appendPQExpBufferStr(&details,
+							 "connection parameters used:");
+		for (c = 0; c < conninfo.size && conninfo.keywords[c] != NULL; c++)
+		{
+			if (conninfo.values[c] != NULL && conninfo.values[c][0] != '\0')
+			{
+				appendPQExpBuffer(&details,
+								  " %s=%s",
+								  conninfo.keywords[c], conninfo.values[c]);
+			}
+		}
+
+	}
+
+	if (mode == OM_OPTFORMAT)
+	{
+		printf("--db-connection=%s\n",
+			   output_check_status(status));
+	}
+	else if (mode == OM_TEXT)
+	{
+		printf("%s (%s)\n",
+			   output_check_status(status),
+			   details.data);
+	}
+	termPQExpBuffer(&details);
 
 	return status;
 }
@@ -2331,6 +2494,8 @@ do_node_rejoin(void)
 	DBState		db_state;
 	PGPing		status;
 	bool		is_shutdown = true;
+	int			server_version_num = UNKNOWN_SERVER_VERSION_NUM;
+	bool		hide_standby_signal = true;
 
 	PQExpBufferData command;
 	PQExpBufferData command_output;
@@ -2361,7 +2526,11 @@ do_node_rejoin(void)
 			break;
 	}
 
-	db_state = get_db_state(config_file_options.data_directory);
+	if (get_db_state(config_file_options.data_directory, &db_state) == false)
+	{
+		log_error(_("unable to determine database state from pg_control"));
+		exit(ERR_BAD_CONFIG);
+	}
 
 	if (is_shutdown == false)
 	{
@@ -2371,6 +2540,21 @@ do_node_rejoin(void)
 		exit(ERR_REJOIN_FAIL);
 	}
 
+	/*
+	 * Server version number required to determine whether pg_rewind will run
+	 * crash recovery (Pg 13 and later).
+	 */
+	server_version_num = get_pg_version(config_file_options.data_directory, NULL);
+
+	if (server_version_num == UNKNOWN_SERVER_VERSION_NUM)
+	{
+		/* This is very unlikely to happen */
+		log_error(_("unable to determine database version"));
+		exit(ERR_BAD_CONFIG);
+	}
+
+	log_verbose(LOG_DEBUG, "server version number is: %i", server_version_num);
+
 	/* check if cleanly shut down */
 	if (db_state != DB_SHUTDOWNED && db_state != DB_SHUTDOWNED_IN_RECOVERY)
 	{
@@ -2378,25 +2562,47 @@ do_node_rejoin(void)
 		{
 			log_error(_("database is still shutting down"));
 		}
+		else if (server_version_num >= 130000 && runtime_options.force_rewind_used == true)
+		{
+			log_warning(_("database is not shut down cleanly"));
+			log_detail(_("--force-rewind provided, pg_rewind will automatically perform recovery"));
+
+			/*
+			 * If pg_rewind is executed, the first change it will make
+			 * is to start the server in single user mode, which will fail
+			 * in the presence of "standby.signal", so we'll "hide" it
+			 * (actually delete and recreate).
+			 */
+			hide_standby_signal = true;
+		}
 		else
 		{
+			/*
+			 * If the database was not shut down cleanly, it *might* rejoin correctly
+			 * after starting up and recovering, but better to ensure the database
+			 * can recover before trying anything else.
+			 */
 			log_error(_("database is not shut down cleanly"));
 
-			if (runtime_options.force_rewind_used == true)
+			if (server_version_num >= 130000)
 			{
-				log_detail(_("pg_rewind will not be able to run"));
+				log_hint(_("provide --force-rewind to run recovery"));
 			}
-			log_hint(_("database should be restarted then shut down cleanly after crash recovery completes"));
+			else
+			{
+				if (runtime_options.force_rewind_used == true)
+				{
+					log_detail(_("pg_rewind will not be able to run"));
+				}
+				log_hint(_("database should be restarted then shut down cleanly after crash recovery completes"));
+			}
+
 			exit(ERR_REJOIN_FAIL);
 		}
 	}
 
 	/* check provided upstream connection */
 	upstream_conn = establish_db_connection_by_params(&source_conninfo, true);
-
-	/* sanity checks for 9.3 */
-	if (PQserverVersion(upstream_conn) < 90400)
-		check_93_config();
 
 	if (get_primary_node_record(upstream_conn, &primary_node_record) == false)
 	{
@@ -2458,7 +2664,7 @@ do_node_rejoin(void)
 		log_hint(_("check the local node is registered with the current primary \"%s\" (ID: %i)"),
 				 primary_node_record.node_name,
 				 primary_node_record.node_id);
-		PQfinish(upstream_conn);
+
 		PQfinish(primary_conn);
 		exit(ERR_BAD_CONFIG);
 	}
@@ -2570,9 +2776,9 @@ do_node_rejoin(void)
 		}
 		else
 		{
-			appendPQExpBuffer(&command,
-							  "%s -D ",
-							  make_pg_path("pg_rewind"));
+			make_pg_path(&command, "pg_rewind");
+			appendPQExpBufferStr(&command,
+								 " -D ");
 		}
 
 		appendShellString(&command,
@@ -2594,12 +2800,46 @@ do_node_rejoin(void)
 			log_detail(_("pg_rewind command is \"%s\""),
 					   command.data);
 
+			/*
+			 * In Pg13 and later, pg_rewind will attempt to start up a server which
+			 * was not cleanly shut down in single user mode. This will fail if
+			 * "standby.signal" is present. We'll remove it and restore it after
+			 * pg_rewind runs.
+			 */
+			if (hide_standby_signal == true)
+			{
+				char	    standby_signal_file_path[MAXPGPATH] = "";
+
+				log_notice(_("temporarily removing \"standby.signal\""));
+				log_detail(_("this is required so pg_rewind can fix the unclean shutdown"));
+
+				make_standby_signal_path(standby_signal_file_path);
+
+				if (unlink(standby_signal_file_path) < 0 && errno != ENOENT)
+				{
+					log_error(_("unable to remove \"standby.signal\" file in data directory \"%s\""),
+							  standby_signal_file_path);
+					log_detail("%s", strerror(errno));
+					exit(ERR_REJOIN_FAIL);
+				}
+			}
+
 			initPQExpBuffer(&command_output);
 
 			ret = local_command(command.data,
 								&command_output);
 
 			termPQExpBuffer(&command);
+
+			if (hide_standby_signal == true)
+			{
+				/*
+				 * Restore standby.signal if we previously removed it, regardless
+				 * of whether the pg_rewind operation failed.
+				 */
+				log_notice(_("recreating \"standby.signal\""));
+				write_standby_signal();
+			}
 
 			if (ret == false)
 			{
@@ -2671,7 +2911,7 @@ do_node_rejoin(void)
 						struct stat statbuf;
 						PQExpBufferData slotdir_ent_path;
 
-						if(strcmp(slotdir_ent->d_name, ".") == 0 || strcmp(slotdir_ent->d_name, "..") == 0)
+						if (strcmp(slotdir_ent->d_name, ".") == 0 || strcmp(slotdir_ent->d_name, "..") == 0)
 							continue;
 
 						initPQExpBuffer(&slotdir_ent_path);
@@ -2777,7 +3017,7 @@ do_node_rejoin(void)
 						   config_file_options.node_rejoin_timeout);
 			}
 			else {
-				log_detail(_("no record for local node \"%s\" found in node \"%s\"'s \"pg_stat_replication\" table"),
+				log_detail(_("no active record for local node \"%s\" found in node \"%s\"'s \"pg_stat_replication\" table"),
 						   config_file_options.node_name,
 						   primary_node_record.node_name);
 			}
@@ -2789,7 +3029,7 @@ do_node_rejoin(void)
 	else
 	{
 		/* -W/--no-wait provided - check once */
-		NodeAttached node_attached = is_downstream_node_attached(primary_conn, config_file_options.node_name);
+		NodeAttached node_attached = is_downstream_node_attached(primary_conn, config_file_options.node_name, NULL);
 		if (node_attached == NODE_ATTACHED)
 			success = true;
 	}
@@ -3398,8 +3638,8 @@ do_node_help(void)
 	printf(_("    --list-actions            show what command would be performed for each action\n"));
 	printf(_("    --checkpoint              issue a CHECKPOINT before stopping or restarting the node\n"));
 	printf(_("    -S, --superuser=USERNAME  superuser to use, if repmgr user is not superuser\n"));
+
 	puts("");
 
-
-
+	printf(_("%s home page: <%s>\n"), "repmgr", REPMGR_URL);
 }

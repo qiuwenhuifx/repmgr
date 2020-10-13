@@ -153,6 +153,9 @@ _establish_db_connection(const char *conninfo, const bool exit_on_error, const b
 	if (param_get(&conninfo_params, "replication") != NULL)
 		is_replication_connection = true;
 
+	/* use a secure search_path */
+	param_set(&conninfo_params, "options", "-csearch_path=");
+
 	connection_string = param_list_to_string(&conninfo_params);
 
 	log_debug(_("connecting to: \"%s\""), connection_string);
@@ -302,6 +305,9 @@ establish_db_connection_by_params(t_conninfo_param_list *param_list,
 	/* set some default values if not explicitly provided */
 	param_set_ine(param_list, "connect_timeout", "2");
 	param_set_ine(param_list, "fallback_application_name", "repmgr");
+
+	/* use a secure search_path */
+	param_set(param_list, "options", "-csearch_path=");
 
 	/* Connect to the database using the provided parameters */
 	conn = PQconnectdbParams((const char **) param_list->keywords, (const char **) param_list->values, true);
@@ -706,9 +712,34 @@ param_get(t_conninfo_param_list *param_list, const char *param)
 
 
 /*
+ * Validate a conninfo string by attempting to parse it.
+ *
+ * "errmsg": passed to PQconninfoParse(), may be NULL
+ *
+ * NOTE: PQconninfoParse() verifies the string format and checks for
+ * valid options but does not sanity check values.
+ */
+
+bool
+validate_conninfo_string(const char *conninfo_str, char **errmsg)
+{
+	PQconninfoOption *connOptions = NULL;
+
+	connOptions = PQconninfoParse(conninfo_str, errmsg);
+
+	if (connOptions == NULL)
+		return false;
+
+	return true;
+}
+
+
+/*
  * Parse a conninfo string into a t_conninfo_param_list
  *
- * See conn_to_param_list() to do the same for a PGconn
+ * See conn_to_param_list() to do the same for a PGconn.
+ *
+ * "errmsg": passed to PQconninfoParse(), may be NULL
  *
  * "ignore_local_params": ignores those parameters specific
  * to a local installation, i.e. when parsing an upstream
@@ -729,8 +760,7 @@ parse_conninfo_string(const char *conninfo_str, t_conninfo_param_list *param_lis
 	for (option = connOptions; option && option->keyword; option++)
 	{
 		/* Ignore non-set or blank parameter values */
-		if ((option->val == NULL) ||
-			(option->val != NULL && option->val[0] == '\0'))
+		if (option->val == NULL || option->val[0] == '\0')
 			continue;
 
 		/* Ignore settings specific to the upstream node */
@@ -775,8 +805,7 @@ conn_to_param_list(PGconn *conn, t_conninfo_param_list *param_list)
 	for (option = connOptions; option && option->keyword; option++)
 	{
 		/* Ignore non-set or blank parameter values */
-		if ((option->val == NULL) ||
-			(option->val != NULL && option->val[0] == '\0'))
+		if (option->val == NULL || option->val[0] == '\0')
 			continue;
 
 		/* Ignore "password" */
@@ -1643,7 +1672,12 @@ identify_system(PGconn *repl_conn, t_system_identification *identification)
 		return false;
 	}
 
+#if defined(__i386__) || defined(__i386)
+	identification->system_identifier = atoll(PQgetvalue(res, 0, 0));
+#else
 	identification->system_identifier = atol(PQgetvalue(res, 0, 0));
+#endif
+
 	identification->timeline = atoi(PQgetvalue(res, 0, 1));
 	identification->xlogpos = parse_lsn(PQgetvalue(res, 0, 2));
 
@@ -1680,7 +1714,11 @@ system_identifier(PGconn *conn)
 	}
 	else
 	{
+#if defined(__i386__) || defined(__i386)
+		system_identifier = atoll(PQgetvalue(res, 0, 0));
+#else
 		system_identifier = atol(PQgetvalue(res, 0, 0));
+#endif
 	}
 
 	PQclear(res);
@@ -1799,7 +1837,7 @@ can_execute_pg_promote(PGconn *conn)
 	bool		has_pg_promote= false;
 
 	/* pg_promote() available from PostgreSQL 12 */
-	if(PQserverVersion(conn) < 120000)
+	if (PQserverVersion(conn) < 120000)
 		return false;
 
 	initPQExpBuffer(&query);
@@ -1827,48 +1865,59 @@ can_execute_pg_promote(PGconn *conn)
 }
 
 
+/*
+ * Determine if the user associated with the current connection is
+ * a member of the "pg_monitor" default role, or optionally one
+ * of its three constituent "subroles".
+ */
 bool
-connection_has_pg_settings(PGconn *conn)
+connection_has_pg_monitor_role(PGconn *conn, const char *subrole)
 {
-	bool		has_pg_settings = false;
+	PQExpBufferData query;
+	PGresult   *res;
+	bool		has_pg_monitor_role = false;
 
-	/* superusers can always read pg_settings */
+	/* superusers can read anything, no role check needed */
 	if (is_superuser_connection(conn, NULL) == true)
+		return true;
+
+	/* pg_monitor and associated "subroles" introduced in PostgreSQL 10 */
+	if (PQserverVersion(conn) < 100000)
+		return false;
+
+	initPQExpBuffer(&query);
+	appendPQExpBufferStr(&query,
+						 "  SELECT CASE "
+						 "           WHEN pg_catalog.pg_has_role('pg_monitor','MEMBER') "
+						 "             THEN TRUE ");
+
+	if (subrole != NULL)
 	{
-		has_pg_settings = true;
-	}
-	/* from PostgreSQL 10, a non-superuser may have been granted access */
-	else if(PQserverVersion(conn) >= 100000)
-	{
-		PQExpBufferData query;
-		PGresult   *res;
-
-		initPQExpBuffer(&query);
-		appendPQExpBufferStr(&query,
-							 "  SELECT CASE "
-							 "           WHEN pg_catalog.pg_has_role('pg_monitor','MEMBER') "
-							 "             THEN TRUE "
-							 "           WHEN pg_catalog.pg_has_role('pg_read_all_settings','MEMBER') "
-							 "             THEN TRUE "
-							 "           ELSE FALSE "
-							 "         END AS has_pg_settings");
-
-		res = PQexec(conn, query.data);
-
-		if (PQresultStatus(res) != PGRES_TUPLES_OK)
-		{
-			log_db_error(conn, query.data,
-						 _("connection_has_pg_settings(): unable to query user roles"));
-		}
-		else
-		{
-			has_pg_settings = atobool(PQgetvalue(res, 0, 0));
-		}
-		termPQExpBuffer(&query);
-		PQclear(res);
+		appendPQExpBuffer(&query,
+						  "           WHEN pg_catalog.pg_has_role('%s','MEMBER') "
+						  "             THEN TRUE ",
+						  subrole);
 	}
 
-	return has_pg_settings;
+	appendPQExpBufferStr(&query,
+						 "           ELSE FALSE "
+						 "         END AS has_pg_monitor");
+
+	res = PQexec(conn, query.data);
+
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+	{
+		log_db_error(conn, query.data,
+					 _("connection_has_pg_monitor_role(): unable to query user roles"));
+	}
+	else
+	{
+		has_pg_monitor_role = atobool(PQgetvalue(res, 0, 0));
+	}
+	termPQExpBuffer(&query);
+	PQclear(res);
+
+	return has_pg_monitor_role;
 }
 
 
@@ -2497,7 +2546,10 @@ resume_wal_replay(PGconn *conn)
 /* Node record functions */
 /* ===================== */
 
-
+/*
+ * Note: init_defaults may only be false when the caller is refreshing a previously
+ * populated record.
+ */
 static RecordStatus
 _get_node_record(PGconn *conn, char *sqlquery, t_node_info *node_info, bool init_defaults)
 {
@@ -2528,6 +2580,10 @@ _get_node_record(PGconn *conn, char *sqlquery, t_node_info *node_info, bool init
 }
 
 
+/*
+ * Note: init_defaults may only be false when the caller is refreshing a previously
+ * populated record.
+ */
 static void
 _populate_node_record(PGresult *res, t_node_info *node_info, int row, bool init_defaults)
 {
@@ -2858,6 +2914,37 @@ get_all_node_records(PGconn *conn, NodeInfoList *node_list)
 	return success;
 }
 
+bool
+get_all_nodes_count(PGconn *conn, int *count)
+{
+	PQExpBufferData query;
+	PGresult   *res = NULL;
+	bool success = true;
+	initPQExpBuffer(&query);
+
+	appendPQExpBufferStr(&query,
+						 "  SELECT count(*) "
+						 "    FROM repmgr.nodes n ");
+
+	log_verbose(LOG_DEBUG, "get_all_nodes_count():\n%s", query.data);
+
+	res = PQexec(conn, query.data);
+
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+	{
+		log_db_error(conn, query.data, _("get_all_nodes_count(): unable to execute query"));
+		success = false;
+	}
+	else
+	{
+		*count = atoi(PQgetvalue(res, 0, 0));
+	}
+
+	PQclear(res);
+	termPQExpBuffer(&query);
+
+	return success;
+}
 
 void
 get_downstream_node_records(PGconn *conn, int node_id, NodeInfoList *node_list)
@@ -2951,7 +3038,7 @@ get_child_nodes(PGconn *conn, int node_id, NodeInfoList *node_list)
 					  "     WHERE n.upstream_node_id = %i ",
 					  node_id);
 
-		log_verbose(LOG_DEBUG, "get_active_sibling_node_records():\n%s", query.data);
+	log_verbose(LOG_DEBUG, "get_child_nodes():\n%s", query.data);
 
 	res = PQexec(conn, query.data);
 
@@ -3514,11 +3601,21 @@ witness_copy_node_records(PGconn *primary_conn, PGconn *witness_conn)
 		return false;
 	}
 
-	get_all_node_records(primary_conn, &nodes);
+	if (get_all_node_records(primary_conn, &nodes) == false)
+	{
+		rollback_transaction(witness_conn);
+
+		return false;
+	}
 
 	for (cell = nodes.head; cell; cell = cell->next)
 	{
-		create_node_record(witness_conn, NULL, cell->node_info);
+		if (create_node_record(witness_conn, NULL, cell->node_info) == false)
+		{
+			rollback_transaction(witness_conn);
+
+			return false;
+		}
 	}
 
 	/* and done */
@@ -5479,21 +5576,9 @@ get_replication_info(PGconn *conn, t_server_type node_type, ReplInfo *replicatio
 	}
 	else
 	{
-		if (PQserverVersion(conn) >= 90400)
-		{
-			appendPQExpBufferStr(&query,
-								 "        COALESCE(pg_catalog.pg_last_xlog_receive_location(), '0/0'::PG_LSN) AS last_wal_receive_lsn, "
-								 "        COALESCE(pg_catalog.pg_last_xlog_replay_location(),  '0/0'::PG_LSN) AS last_wal_replay_lsn, ");
-		}
-		else
-		{
-			/* 9.3 does not have "pg_lsn" datatype */
-			appendPQExpBufferStr(&query,
-								 "        COALESCE(pg_catalog.pg_last_xlog_receive_location(), '0/0') AS last_wal_receive_lsn, "
-								 "        COALESCE(pg_catalog.pg_last_xlog_replay_location(),  '0/0') AS last_wal_replay_lsn, ");
-		}
-
 		appendPQExpBufferStr(&query,
+							 "        COALESCE(pg_catalog.pg_last_xlog_receive_location(), '0/0'::PG_LSN) AS last_wal_receive_lsn, "
+							 "        COALESCE(pg_catalog.pg_last_xlog_replay_location(),  '0/0'::PG_LSN) AS last_wal_replay_lsn, "
 							 "        CASE WHEN pg_catalog.pg_is_in_recovery() IS FALSE "
 							 "          THEN FALSE "
 							 "          ELSE pg_catalog.pg_is_xlog_replay_paused() "
@@ -5664,28 +5749,11 @@ get_node_replication_stats(PGconn *conn, t_node_info *node_info)
 
 	appendPQExpBufferStr(&query,
 						 " SELECT pg_catalog.current_setting('max_wal_senders')::INT AS max_wal_senders, "
-						 "        (SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_replication) AS attached_wal_receivers, ");
-
-	/* no replication slots in PostgreSQL 9.3 */
-	if (PQserverVersion(conn) < 90400)
-	{
-		appendPQExpBufferStr(&query,
-							 "        0 AS max_replication_slots, "
-							 "        0 AS total_replication_slots, "
-							 "        0 AS active_replication_slots, "
-							 "        0 AS inactive_replication_slots, ");
-	}
-	else
-	{
-		appendPQExpBufferStr(&query,
-							 "        current_setting('max_replication_slots')::INT AS max_replication_slots, "
-							 "        (SELECT pg_catalog.count(*) FROM pg_catalog.pg_replication_slots WHERE slot_type='physical') AS total_replication_slots, "
-							 "        (SELECT pg_catalog.count(*) FROM pg_catalog.pg_replication_slots WHERE active IS TRUE AND slot_type='physical')  AS active_replication_slots, "
-							 "        (SELECT pg_catalog.count(*) FROM pg_catalog.pg_replication_slots WHERE active IS FALSE AND slot_type='physical') AS inactive_replication_slots, ");
-	}
-
-
-	appendPQExpBufferStr(&query,
+						 "        (SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_replication) AS attached_wal_receivers, "
+						 "        current_setting('max_replication_slots')::INT AS max_replication_slots, "
+						 "        (SELECT pg_catalog.count(*) FROM pg_catalog.pg_replication_slots WHERE slot_type='physical') AS total_replication_slots, "
+						 "        (SELECT pg_catalog.count(*) FROM pg_catalog.pg_replication_slots WHERE active IS TRUE AND slot_type='physical')  AS active_replication_slots, "
+						 "        (SELECT pg_catalog.count(*) FROM pg_catalog.pg_replication_slots WHERE active IS FALSE AND slot_type='physical') AS inactive_replication_slots, "
 						 "        pg_catalog.pg_is_in_recovery() AS in_recovery");
 
 	log_verbose(LOG_DEBUG, "get_node_replication_stats():\n%s", query.data);
@@ -5720,16 +5788,15 @@ get_node_replication_stats(PGconn *conn, t_node_info *node_info)
 
 
 NodeAttached
-is_downstream_node_attached(PGconn *conn, char *node_name)
+is_downstream_node_attached(PGconn *conn, char *node_name, char **node_state)
 {
 	PQExpBufferData query;
 	PGresult   *res = NULL;
-	int			c = 0;
 
 	initPQExpBuffer(&query);
 
 	appendPQExpBuffer(&query,
-					  " SELECT pg_catalog.count(*) "
+					  " SELECT pid, state "
 					  "   FROM pg_catalog.pg_stat_replication "
 					  "  WHERE application_name = '%s'",
 					  node_name);
@@ -5748,31 +5815,67 @@ is_downstream_node_attached(PGconn *conn, char *node_name)
 		return NODE_ATTACHED_UNKNOWN;
 	}
 
-	if (PQntuples(res) != 1)
-	{
-		log_verbose(LOG_WARNING, _("unexpected number of tuples (%i) returned"), PQntuples(res));
+	termPQExpBuffer(&query);
 
-		termPQExpBuffer(&query);
+	/*
+	 * If there's more than one entry in pg_stat_application, there's no
+	 * way we can reliably determine which one belongs to the node we're
+	 * checking, so there's nothing more we can do.
+	 */
+	if (PQntuples(res) > 1)
+	{
+		log_error(_("multiple entries with \"application_name\" set to  \"%s\" found in \"pg_stat_replication\""),
+				  node_name);
+		log_hint(_("verify that a unique node name is configured for each node"));
+
 		PQclear(res);
 
 		return NODE_ATTACHED_UNKNOWN;
 	}
 
-	c = atoi(PQgetvalue(res, 0, 0));
-
-	termPQExpBuffer(&query);
-	PQclear(res);
-
-	if (c == 0)
+	if (PQntuples(res) == 0)
 	{
-		log_verbose(LOG_WARNING, _("node \"%s\" not found in \"pg_stat_replication\""), node_name);
+		log_warning(_("node \"%s\" not found in \"pg_stat_replication\""), node_name);
+
+		PQclear(res);
 
 		return NODE_DETACHED;
 	}
 
-	if (c > 1)
-		log_verbose(LOG_WARNING, _("multiple entries with \"application_name\" set to  \"%s\" found in \"pg_stat_replication\""),
-					node_name);
+	/*
+	 * If the connection is not a superuser or member of pg_read_all_stats, we
+	 * won't be able to retrieve the "state" column, so we'll assume
+	 * the node is attached.
+	 */
+
+	if (connection_has_pg_monitor_role(conn, "pg_read_all_stats"))
+	{
+		const char *state = PQgetvalue(res, 0, 1);
+
+		if (node_state != NULL)
+		{
+			*node_state = palloc0(strlen(state) + 1);
+			strncpy(*node_state, state, strlen(state));
+		}
+
+		if (strcmp(state, "streaming") != 0)
+		{
+			log_warning(_("node \"%s\" attached in state \"%s\""),
+						node_name,
+						state);
+
+			PQclear(res);
+
+			return NODE_NOT_ATTACHED;
+		}
+	}
+	else if (node_state != NULL)
+	{
+		*node_state = palloc0(1);
+		*node_state[0] = '\0';
+	}
+
+	PQclear(res);
 
 	return NODE_ATTACHED;
 }

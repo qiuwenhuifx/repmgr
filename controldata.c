@@ -90,7 +90,9 @@ get_system_identifier(const char *data_directory)
 	uint64		system_identifier = UNKNOWN_SYSTEM_IDENTIFIER;
 
 	control_file_info = get_controlfile(data_directory);
-	system_identifier = control_file_info->system_identifier;
+
+	if (control_file_info->control_file_processed == true)
+		system_identifier = control_file_info->system_identifier;
 
 	pfree(control_file_info);
 
@@ -98,19 +100,21 @@ get_system_identifier(const char *data_directory)
 }
 
 
-DBState
-get_db_state(const char *data_directory)
+bool
+get_db_state(const char *data_directory, DBState *state)
 {
 	ControlFileInfo *control_file_info = NULL;
-	DBState		state;
+	bool control_file_processed;
 
 	control_file_info = get_controlfile(data_directory);
+	control_file_processed = control_file_info->control_file_processed;
 
-	state = control_file_info->state;
+	if (control_file_processed == true)
+		*state = control_file_info->state;
 
 	pfree(control_file_info);
 
-	return state;
+	return control_file_processed;
 }
 
 
@@ -122,7 +126,8 @@ get_latest_checkpoint_location(const char *data_directory)
 
 	control_file_info = get_controlfile(data_directory);
 
-	checkPoint = control_file_info->checkPoint;
+	if (control_file_info->control_file_processed == true)
+		checkPoint = control_file_info->checkPoint;
 
 	pfree(control_file_info);
 
@@ -134,11 +139,12 @@ int
 get_data_checksum_version(const char *data_directory)
 {
 	ControlFileInfo *control_file_info = NULL;
-	int			data_checksum_version = -1;
+	int			data_checksum_version = UNKNOWN_DATA_CHECKSUM_VERSION;
 
 	control_file_info = get_controlfile(data_directory);
 
-	data_checksum_version = (int) control_file_info->data_checksum_version;
+	if (control_file_info->control_file_processed == true)
+		data_checksum_version = (int) control_file_info->data_checksum_version;
 
 	pfree(control_file_info);
 
@@ -277,8 +283,19 @@ get_controlfile(const char *DataDir)
 		return control_file_info;
 	}
 
-
-	if (version_num >= 90500)
+	if (version_num >= 120000)
+	{
+#if PG_ACTUAL_VERSION_NUM >= 120000
+		expected_size = sizeof(ControlFileData12);
+		ControlFileDataPtr = palloc0(expected_size);
+#endif
+	}
+	else if (version_num >= 110000)
+	{
+		expected_size = sizeof(ControlFileData11);
+		ControlFileDataPtr = palloc0(expected_size);
+	}
+	else if (version_num >= 90500)
 	{
 		expected_size = sizeof(ControlFileData95);
 		ControlFileDataPtr = palloc0(expected_size);
@@ -288,12 +305,6 @@ get_controlfile(const char *DataDir)
 		expected_size = sizeof(ControlFileData94);
 		ControlFileDataPtr = palloc0(expected_size);
 	}
-	else if (version_num >= 90300)
-	{
-		expected_size = sizeof(ControlFileData93);
-		ControlFileDataPtr = palloc0(expected_size);
-	}
-
 
 	if (read(fd, ControlFileDataPtr, expected_size) != expected_size)
 	{
@@ -351,17 +362,6 @@ get_controlfile(const char *DataDir)
 	else if (version_num >= 90400)
 	{
 		ControlFileData94 *ptr = (struct ControlFileData94 *)ControlFileDataPtr;
-		control_file_info->system_identifier = ptr->system_identifier;
-		control_file_info->state = ptr->state;
-		control_file_info->checkPoint = ptr->checkPoint;
-		control_file_info->data_checksum_version = ptr->data_checksum_version;
-		control_file_info->timeline = ptr->checkPointCopy.ThisTimeLineID;
-		control_file_info->minRecoveryPointTLI = ptr->minRecoveryPointTLI;
-		control_file_info->minRecoveryPoint = ptr->minRecoveryPoint;
-	}
-	else if (version_num >= 90300)
-	{
-		ControlFileData93 *ptr = (struct ControlFileData93 *)ControlFileDataPtr;
 		control_file_info->system_identifier = ptr->system_identifier;
 		control_file_info->state = ptr->state;
 		control_file_info->checkPoint = ptr->checkPoint;
