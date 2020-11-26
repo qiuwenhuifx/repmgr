@@ -7,8 +7,8 @@ replication capabilities with utilities to set up standby servers, monitor
 replication, and perform administrative tasks such as failover or switchover
 operations.
 
-PostgreSQL 12, 11, 10, 9.6 and 9.5 are fully supported.
-PostgreSQL 9.4 and 9.3 are supported, with some restrictions.
+The most recent `repmgr` version (5.2.0) supports all PostgreSQL versions from
+9.5 to 13. PostgreSQL 9.4 is also supported, with some restrictions.
 
 `repmgr` is distributed under the GNU GPL 3 and maintained by 2ndQuadrant.
 
@@ -24,7 +24,8 @@ The old `README` file for `repmgr` 3.x is available here:
 > https://github.com/2ndQuadrant/repmgr/blob/REL3_3_STABLE/README.md
 
 Note that the `repmgr` 3.x series is no longer supported and contains known bugs;
-please upgrade to the current `repmgr` version as soon as possible.
+please upgrade to the [current repmgr version](https://repmgr.org/docs/current/appendix-release-notes.html)
+as soon as possible.
 
 Versions
 --------
@@ -70,8 +71,6 @@ Please report bugs and other issues to:
 
 * https://github.com/2ndQuadrant/repmgr
 
-See 
-
 Further information is available at https://repmgr.org/
 
 We'd love to hear from you about how you use repmgr. Case studies and
@@ -100,7 +99,3 @@ Further reading
 * [repmgr documentation](https://repmgr.org/docs/current/index.html)
 * [How to Automate PostgreSQL 12 Replication and Failover with repmgr - Part 1](https://www.2ndquadrant.com/en/blog/how-to-automate-postgresql-12-replication-and-failover-with-repmgr-part-1/)
 * [How to Automate PostgreSQL 12 Replication and Failover with repmgr - Part 2](https://www.2ndquadrant.com/en/blog/how-to-automate-postgresql-12-replication-and-failover-with-repmgr-part-2/)
-* https://blog.2ndquadrant.com/repmgr-3-2-is-here-barman-support-brand-new-high-availability-features/
-* https://blog.2ndquadrant.com/improvements-in-repmgr-3-1-4/
-* https://blog.2ndquadrant.com/managing-useful-clusters-repmgr/
-* https://blog.2ndquadrant.com/easier_postgresql_90_clusters/

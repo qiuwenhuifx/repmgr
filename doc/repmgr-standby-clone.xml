@@ -105,14 +105,6 @@
    <itemizedlist spacing="compact" mark="bullet">
 
      <listitem>
-       <simpara><varname>standby_mode</varname> (always <literal>'on'</literal>)</simpara>
-     </listitem>
-
-     <listitem>
-       <simpara><varname>recovery_target_timeline</varname> (always <literal>'latest'</literal>)</simpara>
-     </listitem>
-
-     <listitem>
        <simpara><varname>primary_conninfo</varname></simpara>
      </listitem>
 
@@ -121,6 +113,21 @@
      </listitem>
 
    </itemizedlist>
+
+   <para>
+     For PostgreSQL 11 and earlier, these parameters will also be set:
+   </para>
+
+   <itemizedlist spacing="compact" mark="bullet">
+     <listitem>
+       <simpara><varname>standby_mode</varname> (always <literal>'on'</literal>)</simpara>
+     </listitem>
+
+     <listitem>
+       <simpara><varname>recovery_target_timeline</varname> (always <literal>'latest'</literal>)</simpara>
+     </listitem>
+   </itemizedlist>
+
 
    <para>
      The following additional parameters can be specified in <filename>repmgr.conf</filename>
@@ -253,16 +260,29 @@ pg_basebackup_options='--waldir=/path/to/wal-directory'</programlisting>
      upstream node if required.
    </para>
    <para>
-     Note that the upstream node must be running. In PostgreSQL 11 and earlier, an existing
-     <filename>recovery.conf</filename> will not be overwritten unless the
-     <option>-F/--force</option> option is provided.
+     The upstream node must be running so the correct replication configuration can be obtained.
    </para>
    <para>
-     Execute <command>repmgr standby clone --replication-conf-only --dry-run</command>
-     to check the prerequisites for creating the recovery configuration,
-     and display the contents of the configuration which would be added without actually
-	 making any changes.
+     If the standby is running, the replication configuration will not be written unless the
+     <option>-F/--force</option> option is provided.
    </para>
+   <tip>
+     <para>
+       Execute <command>repmgr standby clone --replication-conf-only --dry-run</command>
+       to check the prerequisites for creating the recovery configuration,
+       and display the configuration changes which would be made without actually
+	   making any changes.
+     </para>
+   </tip>
+   <para>
+     In PostgreSQL 13 and later, the PostgreSQL configuration must be reloaded for replication
+     configuration changes to take effect.
+   </para>
+   <para>
+     In PostgreSQL 12 and earlier, the PostgreSQL instance must be restarted for replication
+     configuration changes to take effect.
+   </para>
+
 
   </refsect1>
 
@@ -324,6 +344,25 @@ pg_basebackup_options='--waldir=/path/to/wal-directory'</programlisting>
         </listitem>
       </varlistentry>
 
+
+      <varlistentry>
+        <term><option>--recovery-min-apply-delay</option></term>
+        <listitem>
+          <para>
+            Set PostgreSQL configuration <option>recovery_min_apply_delay</option> parameter
+            to the provided value.
+          </para>
+          <para>
+            This overrides any <option>recovery_min_apply_delay</option> provided via
+            <filename>repmgr.conf</filename>.
+          </para>
+          <para>
+            For more details on this parameter, see:
+            <ulink url="https://www.postgresql.org/docs/current/runtime-config-replication.html#GUC-RECOVERY-MIN-APPLY-DELAY">recovery_min_apply_delay</ulink>.
+          </para>
+        </listitem>
+      </varlistentry>
+
       <varlistentry>
         <term><option>-R, --remote-user=USERNAME</option></term>
         <listitem>
@@ -340,12 +379,12 @@ pg_basebackup_options='--waldir=/path/to/wal-directory'</programlisting>
             Create recovery configuration for a previously cloned instance.
           </para>
 		  <para>
-			In PostgreSQL 11 and earlier, the replication configuration will be
-			written to <filename>recovery.conf</filename>.
-		  </para>
-		  <para>
 			In PostgreSQL 12 and later, the replication configuration will be
 			written to <filename>postgresql.auto.conf</filename>.
+		  </para>
+		  <para>
+			In PostgreSQL 11 and earlier, the replication configuration will be
+			written to <filename>recovery.conf</filename>.
 		  </para>
         </listitem>
       </varlistentry>

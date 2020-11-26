@@ -670,6 +670,15 @@ do_standby_clone(void)
 			log_hint(_("consider using the -c/--fast-checkpoint option"));
 		}
 
+		if (mode == pg_basebackup)
+		{
+			/*
+			 * In --dry-run mode, this will just output the pg_basebackup command which
+			 * would be executed.
+			 */
+			run_basebackup(&local_node_record);
+		}
+
 		PQfinish(source_conn);
 
 		log_info(_("all prerequisites for \"standby clone\" are met"));
@@ -1444,7 +1453,18 @@ _do_create_replication_conf(void)
 
 			if (node_is_running == true)
 			{
-				log_hint(_("node must be restarted for the new file to take effect"));
+				if (PQserverVersion(upstream_conn) >= 130000)
+				{
+					log_hint(_("configuration must be reloaded for the configuration changes to take effect"));
+				}
+				else if (PQserverVersion(upstream_conn) >= 120000)
+				{
+					log_hint(_("node must be restarted for the configuration changes to take effect"));
+				}
+				else
+				{
+					log_hint(_("node must be restarted for the new file to take effect"));
+				}
 			}
 		}
 	}
@@ -5962,19 +5982,22 @@ check_source_server_via_barman()
 
 	initPQExpBuffer(&command_output);
 	maxlen_snprintf(buf,
-					"ssh %s \"psql -Aqt \\\"%s\\\" -c \\\""
+					"psql -AqtX -d \\\"%s\\\" -c \\\""
 					" SELECT conninfo"
 					" FROM repmgr.nodes"
 					" WHERE %s"
 					" AND active IS TRUE"
-					"\\\"\"",
-					config_file_options.barman_host,
+					"\\\"",
 					repmgr_conninfo_buf.data,
 					where_condition);
 
 	termPQExpBuffer(&repmgr_conninfo_buf);
 
-	command_success = local_command(buf, &command_output);
+	command_success = remote_command(config_file_options.barman_host,
+									 runtime_options.remote_user,
+									 buf,
+									 config_file_options.ssh_options,
+									 &command_output);
 
 	if (command_success == false)
 	{
@@ -6773,6 +6796,13 @@ run_basebackup(t_node_info *node_record)
 
 	termPQExpBuffer(&params);
 
+	if (runtime_options.dry_run == true)
+	{
+		log_info(_("would execute:\n  %s"), script.data);
+		termPQExpBuffer(&script);
+		return SUCCESS;
+	}
+
 	log_info(_("executing:\n  %s"), script.data);
 
 	/*
@@ -6944,16 +6974,6 @@ run_file_backup(t_node_info *local_node_record)
 	{
 		t_basebackup_options backup_options = T_BASEBACKUP_OPTIONS_INITIALIZER;
 
-		Assert(source_server_version_num != UNKNOWN_SERVER_VERSION_NUM);
-
-		/*
-		 * Parse the pg_basebackup_options provided in repmgr.conf - we need to
-		 * check if --waldir/--xlogdir was provided.
-		 */
-		parse_pg_basebackup_options(config_file_options.pg_basebackup_options,
-									&backup_options,
-									source_server_version_num,
-									NULL);
 		/*
 		 * Locate Barman's base backups directory
 		 */
@@ -7160,6 +7180,37 @@ run_file_backup(t_node_info *local_node_record)
 							 NULL);
 
 		unlink(datadir_list_filename);
+
+		/*
+		 * At this point we should have the source server version number.
+		 * If not, try and extract it from the data directory.
+		 */
+		if (source_server_version_num == UNKNOWN_SERVER_VERSION_NUM)
+		{
+			log_warning(_("server version number is unknown"));
+			source_server_version_num = get_pg_version(local_data_directory, NULL);
+
+			/*
+			 * In the unlikely we are still unable to obtain the server
+			 * version number, there's not a lot which can be done.
+			 */
+			if (source_server_version_num == UNKNOWN_SERVER_VERSION_NUM)
+			{
+				log_error(_("unable to extract server version number from the data directory, aborting"));
+				exit(ERR_BAD_CONFIG);
+			}
+			log_notice(_("server version number is: %i"), source_server_version_num);
+		}
+
+		/*
+		 * Parse the pg_basebackup_options provided in repmgr.conf - we need to
+		 * check if --waldir/--xlogdir was provided.
+		 */
+		parse_pg_basebackup_options(config_file_options.pg_basebackup_options,
+									&backup_options,
+									source_server_version_num,
+									NULL);
+
 
 		/*
 		 * We must create some PGDATA subdirectories because they are not
@@ -7738,7 +7789,9 @@ static void
 tablespace_data_append(TablespaceDataList *list, const char *name, const char *oid, const char *location)
 {
 	TablespaceDataListCell *cell = NULL;
-
+	int oid_len = strlen(oid);
+	int name_len = strlen(name);
+	int location_len = strlen(location);
 	cell = (TablespaceDataListCell *) pg_malloc0(sizeof(TablespaceDataListCell));
 
 	if (cell == NULL)
@@ -7747,13 +7800,13 @@ tablespace_data_append(TablespaceDataList *list, const char *name, const char *o
 		exit(ERR_OUT_OF_MEMORY);
 	}
 
-	cell->oid = pg_malloc(1 + strlen(oid));
-	cell->name = pg_malloc(1 + strlen(name));
-	cell->location = pg_malloc(1 + strlen(location));
+	cell->oid = pg_malloc0(1 + oid_len);
+	cell->name = pg_malloc0(1 + name_len);
+	cell->location = pg_malloc0(1 + location_len);
 
-	strncpy(cell->oid, oid, 1 + strlen(oid));
-	strncpy(cell->name, name, 1 + strlen(name));
-	strncpy(cell->location, location, 1 + strlen(location));
+	strncpy(cell->oid, oid, oid_len);
+	strncpy(cell->name, name, name_len);
+	strncpy(cell->location, location, location_len);
 
 	if (list->tail)
 		list->tail->next = cell;
@@ -7864,10 +7917,17 @@ create_recovery_file(t_node_info *node_record, t_conninfo_param_list *primary_co
 	key_value_list_set(&recovery_config,
 					   "primary_conninfo", primary_conninfo_buf.data);
 
-	/* recovery_target_timeline = 'latest' */
-	key_value_list_set(&recovery_config,
-					   "recovery_target_timeline", "latest");
+	/*
+	 * recovery_target_timeline = 'latest'
+	 *
+	 * PostgreSQL 11 and earlier only; 'latest' is the default from PostgreSQL 12.
+	 */
 
+	if (server_version_num < 120000)
+	{
+		key_value_list_set(&recovery_config,
+						   "recovery_target_timeline", "latest");
+	}
 
 	/* recovery_min_apply_delay = ... (optional) */
 	if (config_file_options.recovery_min_apply_delay_provided == true)

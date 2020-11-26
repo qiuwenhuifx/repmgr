@@ -107,11 +107,9 @@ ProcessRepmgrConfigFile(const char *config_file, const char *base_dir, ItemList 
 
 
 extern bool
-ProcessPostgresConfigFile(const char *config_file, const char *base_dir, KeyValueList *contents, ItemList *error_list, ItemList *warning_list)
+ProcessPostgresConfigFile(const char *config_file, const char *base_dir, bool strict, KeyValueList *contents, ItemList *error_list, ItemList *warning_list)
 {
-	//printf("ProcessPostgresConfigFile(): base: %s file: %s\n", base_dir, config_file);
-
-	return ProcessConfigFile(base_dir, config_file, NULL, true, 0, contents, error_list, warning_list);
+	return ProcessConfigFile(base_dir, config_file, NULL, strict, 0, contents, error_list, warning_list);
 }
 
 static bool
@@ -210,7 +208,6 @@ ProcessConfigFp(FILE *fp, const char *config_file, const char *calling_file, int
 		goto cleanup;
 	}
 
-	//printf("ProcessConfigFp(): base: '%s' file: '%s'; calling: '%s'\n", base_dir, config_file, calling_file);
 	/*
 	 * Parse
 	 */

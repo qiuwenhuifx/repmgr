@@ -313,6 +313,9 @@ _parse_config(ItemList *error_list, ItemList *warning_list)
 			case CONFIG_CONNECTION_CHECK_TYPE:
 				*setting->val.checktypeptr = setting->defval.checktypedefault;
 				break;
+			case CONFIG_REPLICATION_TYPE:
+				*setting->val.replicationtypeptr = setting->defval.replicationtypedefault;
+				break;
 			case CONFIG_EVENT_NOTIFICATION_LIST:
 			case CONFIG_TABLESPACE_MAPPING:
 				/* no default for these types; lists cleared above */
@@ -562,6 +565,20 @@ parse_configuration_item(ItemList *error_list, ItemList *warning_list, const cha
 					{
 						item_list_append_format(error_list,
 												_("value for \"%s\" must be \"ping\", \"connection\" or \"query\"\n"),
+												name);
+					}
+					break;
+				}
+				case CONFIG_REPLICATION_TYPE:
+				{
+					if (strcasecmp(value, "physical") == 0)
+					{
+						*(ReplicationType *)setting->val.replicationtypeptr = REPLICATION_TYPE_PHYSICAL;
+					}
+					else
+					{
+						item_list_append_format(error_list,
+												_("value for \"%s\" must be \"physical\"\n"),
 												name);
 					}
 					break;
@@ -1394,6 +1411,9 @@ dump_config(void)
 			case CONFIG_CONNECTION_CHECK_TYPE:
 				printf("%s", print_connection_check_type(*setting->val.checktypeptr));
 				break;
+			case CONFIG_REPLICATION_TYPE:
+				printf("%s", print_replication_type(*setting->val.replicationtypeptr));
+				break;
 			case CONFIG_EVENT_NOTIFICATION_LIST:
 			{
 				char *list = print_event_notification_list(setting->val.notificationlistptr);
@@ -1765,7 +1785,7 @@ modify_auto_conf(const char *data_dir, KeyValueList *items)
 
 	FILE	   *fp;
 	mode_t		um;
-	struct stat auto_conf_st;
+	struct stat data_dir_st;
 
 	KeyValueList config = {NULL, NULL};
 	KeyValueListCell *cell = NULL;
@@ -1776,7 +1796,12 @@ modify_auto_conf(const char *data_dir, KeyValueList *items)
 	appendPQExpBuffer(&auto_conf, "%s/%s",
 					  data_dir, PG_AUTOCONF_FILENAME);
 
-	success = ProcessPostgresConfigFile(auto_conf.data, NULL, &config, NULL, NULL);
+	success = ProcessPostgresConfigFile(auto_conf.data,
+										NULL,
+										false, /* we don't care if the file does not exist */
+										&config,
+										NULL,
+										NULL);
 
 	if (success == false)
 	{
@@ -1787,7 +1812,7 @@ modify_auto_conf(const char *data_dir, KeyValueList *items)
 	}
 
 	/*
-	 * Append requested items to items extracted from the existing file.
+	 * Append requested items to any items extracted from the existing file.
 	 */
 	for (cell = items->head; cell; cell = cell->next)
 	{
@@ -1816,27 +1841,46 @@ modify_auto_conf(const char *data_dir, KeyValueList *items)
 						  cell->key, cell->value);
 	}
 
-	stat(auto_conf.data, &auto_conf_st);
+	/* stat the data directory for the file mode */
+	if (stat(data_dir, &data_dir_st) != 0)
+	{
+		/*
+		 * This is highly unlikely to happen, but if it does (e.g. freak
+		 * race condition with some rogue process which is messing about
+		 * with the data directory), there's not a lot we can do.
+		 */
+		log_error(_("error encountered when checking \"%s\""),
+				  data_dir);
+		log_detail("%s", strerror(errno));
+		exit(ERR_BAD_CONFIG);
+	}
 
 	/*
-	 * Set umask so the temporary file is created in the same mode as the original
-	 * postgresql.auto.conf file.
+	 * Set umask so the temporary file is created in the same mode as the data
+	 * directory. In PostgreSQL 11 and later this can be 0700 or 0750.
 	 */
-	um = umask(~(auto_conf_st.st_mode));
+	um = umask(~(data_dir_st.st_mode));
+
 	fp = fopen(auto_conf_tmp.data, "w");
+
 	umask(um);
 
 	if (fp == NULL)
 	{
-		fprintf(stderr, "unable to open \"%s\": %s\n",
+		fprintf(stderr, "unable to open \"%s\" for writing: %s\n",
 				auto_conf_tmp.data,
 				strerror(errno));
+		success = false;
 	}
 	else
 	{
 		if (fwrite(auto_conf_contents.data, strlen(auto_conf_contents.data), 1, fp) != 1)
 		{
+			fprintf(stderr, "unable to write to \"%s\": %s\n",
+					auto_conf_tmp.data,
+					strerror(errno));
 			fclose(fp);
+			success = false;
 		}
 		else
 		{
@@ -2168,6 +2212,20 @@ parse_pg_basebackup_options(const char *pg_basebackup_options, t_basebackup_opti
 
 
 const char *
+print_replication_type(ReplicationType type)
+{
+	switch (type)
+	{
+		case REPLICATION_TYPE_PHYSICAL:
+			return "physical";
+	}
+
+	/* should never reach here */
+	return "UNKNOWN";
+}
+
+
+const char *
 print_connection_check_type(ConnectionCheckType type)
 {
 	switch (type)
@@ -2192,6 +2250,7 @@ print_event_notification_list(EventNotificationList *list)
 	PQExpBufferData buf;
 	char *ptr;
 	EventNotificationListCell *cell;
+	int ptr_len;
 
 	initPQExpBuffer(&buf);
 	cell = list->head;
@@ -2206,8 +2265,10 @@ print_event_notification_list(EventNotificationList *list)
 		cell = cell->next;
 	}
 
-	ptr = palloc0(strlen(buf.data) + 1);
-	strncpy(ptr, buf.data, strlen(buf.data));
+	ptr_len = strlen(buf.data);
+	ptr = palloc0(ptr_len + 1);
+
+	strncpy(ptr, buf.data, ptr_len);
 
 	termPQExpBuffer(&buf);
 

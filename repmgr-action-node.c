@@ -2495,7 +2495,7 @@ do_node_rejoin(void)
 	PGPing		status;
 	bool		is_shutdown = true;
 	int			server_version_num = UNKNOWN_SERVER_VERSION_NUM;
-	bool		hide_standby_signal = true;
+	bool		hide_standby_signal = false;
 
 	PQExpBufferData command;
 	PQExpBufferData command_output;
@@ -2688,7 +2688,7 @@ do_node_rejoin(void)
 	 * sanity-check that it will actually be possible to stream from the new upstream
 	 */
 	{
-		bool can_follow;
+		bool can_rejoin;
 		TimeLineID tli = get_min_recovery_end_timeline(config_file_options.data_directory);
 		XLogRecPtr min_recovery_location = get_min_recovery_location(config_file_options.data_directory);
 
@@ -2702,13 +2702,13 @@ do_node_rejoin(void)
 		if (tli == 0)
 			tli = get_timeline(config_file_options.data_directory);
 
-		can_follow = check_node_can_attach(tli,
+		can_rejoin = check_node_can_attach(tli,
 										   min_recovery_location,
 										   primary_conn,
 										   &primary_node_record,
 										   true);
 
-		if (can_follow == false)
+		if (can_rejoin == false)
 		{
 			PQfinish(primary_conn);
 			exit(ERR_REJOIN_FAIL);
@@ -2843,7 +2843,7 @@ do_node_rejoin(void)
 
 			if (ret == false)
 			{
-				log_error(_("unable to execute pg_rewind"));
+				log_error(_("pg_rewind execution failed"));
 				log_detail("%s", command_output.data);
 
 				termPQExpBuffer(&command_output);
